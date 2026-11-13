@@ -1,0 +1,2066 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Overland Flyer — a Wild West Train Robbery</title>
+</head>
+<body>
+<style>
+  :root{
+    --ink:#efe2c8; --ink-dim:#c9b490; --coal:#100d0b; --brass:#c9a24a;
+  }
+  html,body{height:100%;}
+  body{
+    margin:0; background:#100d0b; overflow:hidden;
+    font-family:"Palatino Linotype","Book Antiqua",Georgia,"Times New Roman",serif;
+    color:var(--ink);
+    -webkit-user-select:none; user-select:none;
+  }
+  #gl{position:fixed; inset:0; width:100%; height:100%; display:block; cursor:grab;}
+  #gl.dragging{cursor:grabbing;}
+
+  /* cinematic letterbox */
+  .bar{position:fixed; left:0; right:0; height:6.5vh; background:#0a0808; z-index:5; pointer-events:none;}
+  .bar.top{top:0; box-shadow:0 1px 0 rgba(239,226,200,.08);}
+  .bar.bot{bottom:0; box-shadow:0 -1px 0 rgba(239,226,200,.08);}
+
+  /* vignette + warm grade assist */
+  #vig{position:fixed; inset:0; z-index:4; pointer-events:none;
+    background:
+      radial-gradient(ellipse 130% 105% at 50% 42%, rgba(0,0,0,0) 58%, rgba(16,8,4,.42) 100%),
+      linear-gradient(rgba(255,180,90,.045), rgba(20,8,30,.06));
+  }
+
+  /* title card */
+  #title{
+    position:fixed; left:0; right:0; top:0; bottom:0; z-index:6;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; pointer-events:none; opacity:0;
+    transition:opacity 1.6s ease;
+    text-shadow:0 2px 18px rgba(0,0,0,.75), 0 0 2px rgba(0,0,0,.9);
+  }
+  #title.show{opacity:1;}
+  #title .rule{width:min(46vw,340px); border-top:3px double rgba(239,226,200,.75); margin:14px 0;}
+  #title h1{
+    margin:0; font-size:clamp(30px, 6.2vw, 74px); font-weight:700;
+    letter-spacing:.22em; text-indent:.22em; line-height:1.05; color:var(--ink);
+    text-wrap:balance;
+  }
+  #title .over{font-size:clamp(11px,1.5vw,16px); letter-spacing:.55em; text-indent:.55em; color:var(--brass); margin-bottom:6px;}
+  #title .sub{font-size:clamp(11px,1.6vw,17px); letter-spacing:.38em; text-indent:.38em; color:var(--ink-dim); font-style:italic;}
+
+  /* controls */
+  #hud{
+    position:fixed; right:18px; bottom:calc(6.5vh + 12px); z-index:7;
+    display:flex; gap:8px; align-items:center;
+    font-family:"Segoe UI",system-ui,sans-serif;
+  }
+  #hud button{
+    appearance:none; border:1px solid rgba(239,226,200,.3); border-radius:2px;
+    background:rgba(16,10,6,.55); color:var(--ink);
+    font-family:inherit; font-size:11px; letter-spacing:.18em; text-transform:uppercase;
+    padding:7px 12px; cursor:pointer; backdrop-filter:blur(3px);
+  }
+  #hud button:hover{border-color:rgba(239,226,200,.7); background:rgba(30,18,10,.65);}
+  #hud button:focus-visible{outline:2px solid var(--brass); outline-offset:2px;}
+  #hint{
+    position:fixed; left:18px; bottom:calc(6.5vh + 16px); z-index:7;
+    font-family:"Segoe UI",system-ui,sans-serif; font-size:11px; letter-spacing:.16em;
+    text-transform:uppercase; color:rgba(239,226,200,.55);
+    transition:opacity 2s ease; pointer-events:none;
+  }
+  #hint.gone{opacity:0;}
+
+  /* fatal error overlay */
+  #err{
+    position:fixed; inset:0; z-index:50; display:none; padding:8vh 8vw;
+    background:rgba(12,8,6,.96); color:#f0c9a8; font:13px/1.6 Consolas,monospace;
+    white-space:pre-wrap; overflow:auto;
+  }
+  #err b{color:#ffb26b; font-size:15px;}
+</style>
+
+<canvas id="gl"></canvas>
+<div id="vig"></div>
+<div class="bar top"></div>
+<div class="bar bot"></div>
+
+<div id="title" aria-hidden="true">
+  <div class="over">THE TERRITORIES &nbsp;·&nbsp; 1879</div>
+  <div class="rule"></div>
+  <h1>THE OVERLAND FLYER</h1>
+  <div class="rule"></div>
+  <div class="sub">a hold-up at full steam, somewhere west of Contention</div>
+</div>
+
+<div id="hud">
+  <button id="btnSound" type="button" title="toggle sound">&#9834; sound off</button>
+  <button id="btnCam" type="button" title="toggle camera mode">&#127916; cinematic</button>
+</div>
+<div id="hint">drag to look &nbsp;·&nbsp; scroll to zoom &nbsp;·&nbsp; space to pause</div>
+
+<div id="err"></div>
+
+<script>
+"use strict";
+/* ============================================================
+   THE OVERLAND FLYER — a wild-west train robbery
+   single-file WebGL scene: no libraries, no external assets.
+   ============================================================ */
+
+const ERR = document.getElementById('err');
+function fatal(msg){
+  ERR.style.display = 'block';
+  ERR.innerHTML = '<b>The reel snapped.</b>\n\n' + String(msg).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+}
+window.addEventListener('error', e => fatal((e.message||'error') + '\n' + (e.filename||'') + ':' + (e.lineno||'') + '\n' + (e.error && e.error.stack || '')));
+window.addEventListener('unhandledrejection', e => fatal('unhandled rejection: ' + (e.reason && e.reason.stack || e.reason)));
+
+const PARAMS = new URLSearchParams(location.search);
+const START_T   = parseFloat(PARAMS.get('t') || '0') || 0;     // fast-forward for screenshots
+const LOCK_SHOT = PARAMS.has('shot') ? PARAMS.get('shot') : null; // lock a camera shot ('0'..'5' or 'leap')
+const REDUCED   = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+</script>
+<script>
+"use strict";
+/* ================= math ================= */
+const TAU = Math.PI*2;
+const clamp = (v,a,b)=> v<a?a : v>b?b : v;
+const lerp  = (a,b,t)=> a+(b-a)*t;
+const sstep = (a,b,v)=>{ const t = clamp((v-a)/(b-a),0,1); return t*t*(3-2*t); };
+
+function v3sub(a,b){ return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+function v3add(a,b){ return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]; }
+function v3scale(a,s){ return [a[0]*s, a[1]*s, a[2]*s]; }
+function v3cross(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function v3dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function v3len(a){ return Math.hypot(a[0],a[1],a[2]); }
+function v3norm(a){ const l = v3len(a)||1; return [a[0]/l, a[1]/l, a[2]/l]; }
+function v3lerp(a,b,t){ return [lerp(a[0],b[0],t), lerp(a[1],b[1],t), lerp(a[2],b[2],t)]; }
+
+/* column-major mat4 */
+function m4ident(){ const m = new Float32Array(16); m[0]=m[5]=m[10]=m[15]=1; return m; }
+function m4mul(a,b){
+  const o = new Float32Array(16);
+  for(let c=0;c<4;c++){
+    const b0=b[c*4], b1=b[c*4+1], b2=b[c*4+2], b3=b[c*4+3];
+    o[c*4  ] = a[0]*b0 + a[4]*b1 + a[8]*b2  + a[12]*b3;
+    o[c*4+1] = a[1]*b0 + a[5]*b1 + a[9]*b2  + a[13]*b3;
+    o[c*4+2] = a[2]*b0 + a[6]*b1 + a[10]*b2 + a[14]*b3;
+    o[c*4+3] = a[3]*b0 + a[7]*b1 + a[11]*b2 + a[15]*b3;
+  }
+  return o;
+}
+function m4trans(x,y,z){ const m = m4ident(); m[12]=x; m[13]=y; m[14]=z; return m; }
+function m4scale(x,y,z){ const m = m4ident(); m[0]=x; m[5]=y; m[10]=z; return m; }
+function m4rotX(a){ const m = m4ident(), c=Math.cos(a), s=Math.sin(a); m[5]=c; m[6]=s; m[9]=-s; m[10]=c; return m; }
+function m4rotY(a){ const m = m4ident(), c=Math.cos(a), s=Math.sin(a); m[0]=c; m[2]=-s; m[8]=s; m[10]=c; return m; }
+function m4rotZ(a){ const m = m4ident(), c=Math.cos(a), s=Math.sin(a); m[0]=c; m[1]=s; m[4]=-s; m[5]=c; return m; }
+function m4persp(fovY, aspect, near, far){
+  const f = 1/Math.tan(fovY/2), m = new Float32Array(16);
+  m[0]=f/aspect; m[5]=f; m[10]=(far+near)/(near-far); m[11]=-1; m[14]=2*far*near/(near-far);
+  return m;
+}
+function m4lookAt(eye, ctr, up){
+  const z = v3norm(v3sub(eye,ctr));
+  const x = v3norm(v3cross(up,z));
+  const y = v3cross(z,x);
+  const m = new Float32Array(16);
+  m[0]=x[0]; m[1]=y[0]; m[2]=z[0];
+  m[4]=x[1]; m[5]=y[1]; m[6]=z[1];
+  m[8]=x[2]; m[9]=y[2]; m[10]=z[2];
+  m[12]=-v3dot(x,eye); m[13]=-v3dot(y,eye); m[14]=-v3dot(z,eye); m[15]=1;
+  return m;
+}
+function m4point(m, x,y,z){
+  return [ m[0]*x+m[4]*y+m[8]*z+m[12], m[1]*x+m[5]*y+m[9]*z+m[13], m[2]*x+m[6]*y+m[10]*z+m[14] ];
+}
+
+/* deterministic RNG for scenery placement */
+function mulberry(seed){
+  let a = seed>>>0;
+  return function(){
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a>>>15), 1 | a);
+    t = (t + Math.imul(t ^ (t>>>7), 61 | t)) ^ t;
+    return ((t ^ (t>>>14)) >>> 0) / 4294967296;
+  };
+}
+/* stable position hash for static-geometry tone jitter */
+function hashJit(x,y,z){
+  const s = Math.sin(x*12.9898 + y*78.233 + z*37.719) * 43758.5453;
+  return (s - Math.floor(s)) - 0.5;
+}
+
+/* ================= mesh builder ================= */
+/* interleaved: pos(3) nrm(3) rgb(3) emissive(1) wrapCenterX(1) = 11 floats */
+const VSTRIDE = 11;
+const BOX_FACES = [[1,3,7,5],[4,6,2,0],[2,6,7,3],[0,1,5,4],[4,5,7,6],[1,0,2,3]];
+
+class MeshBuilder{
+  constructor(capVerts){
+    this.f = new Float32Array(capVerts*VSTRIDE);
+    this.n = 0;
+    this.stack = [m4ident()];
+    this.ctr = 0;      // wrap-center x stamped on verts (static scenery only)
+    this.jit = 0;      // per-face tone jitter amount (static scenery only)
+  }
+  reset(){ this.n = 0; this.stack.length = 1; this.stack[0] = m4ident(); this.ctr = 0; this.jit = 0; }
+  get top(){ return this.stack[this.stack.length-1]; }
+  set top(m){ this.stack[this.stack.length-1] = m; }
+  push(){ this.stack.push(this.top.slice()); }
+  pop(){ this.stack.pop(); }
+  t(x,y,z){ this.top = m4mul(this.top, m4trans(x,y,z)); }
+  s(x,y,z){ this.top = m4mul(this.top, m4scale(x,y,z)); }
+  rx(a){ this.top = m4mul(this.top, m4rotX(a)); }
+  ry(a){ this.top = m4mul(this.top, m4rotY(a)); }
+  rz(a){ this.top = m4mul(this.top, m4rotZ(a)); }
+  wp(x,y,z){ return m4point(this.top, x,y,z); }
+
+  _grow(need){
+    if((this.n+need)*VSTRIDE <= this.f.length) return;
+    let cap = this.f.length;
+    while((this.n+need)*VSTRIDE > cap) cap *= 2;
+    const nf = new Float32Array(cap); nf.set(this.f); this.f = nf;
+  }
+  _v(p, nx,ny,nz, r,g,b,e){
+    const i = this.n*VSTRIDE, f = this.f;
+    f[i]=p[0]; f[i+1]=p[1]; f[i+2]=p[2];
+    f[i+3]=nx; f[i+4]=ny; f[i+5]=nz;
+    f[i+6]=r; f[i+7]=g; f[i+8]=b; f[i+9]=e;
+    f[i+10]=this.ctr;
+    this.n++;
+  }
+  /* two triangles p0p1p2 / p0p2p3, flat normal from winding */
+  _face(p0,p1,p2,p3, col, e){
+    this._grow(6);
+    const nv = v3norm(v3cross(v3sub(p1,p0), v3sub(p2,p0)));
+    let r = col[0], g = col[1], b = col[2];
+    if(this.jit){
+      const j = 1 + this.jit * hashJit(p0[0],p0[1],p0[2]);
+      r = clamp(r*j,0,1); g = clamp(g*j,0,1); b = clamp(b*j,0,1);
+    }
+    const nx=nv[0], ny=nv[1], nz=nv[2];
+    this._v(p0,nx,ny,nz,r,g,b,e); this._v(p1,nx,ny,nz,r,g,b,e); this._v(p2,nx,ny,nz,r,g,b,e);
+    this._v(p0,nx,ny,nz,r,g,b,e); this._v(p2,nx,ny,nz,r,g,b,e); this._v(p3,nx,ny,nz,r,g,b,e);
+  }
+  tri(p0,p1,p2, col, e){
+    this._grow(3);
+    const nv = v3norm(v3cross(v3sub(p1,p0), v3sub(p2,p0)));
+    this._v(p0,nv[0],nv[1],nv[2],col[0],col[1],col[2],e||0);
+    this._v(p1,nv[0],nv[1],nv[2],col[0],col[1],col[2],e||0);
+    this._v(p2,nv[0],nv[1],nv[2],col[0],col[1],col[2],e||0);
+  }
+  quad(a,b,c,d, col, e){
+    const m = this.top;
+    this._face(m4point(m,a[0],a[1],a[2]), m4point(m,b[0],b[1],b[2]),
+               m4point(m,c[0],c[1],c[2]), m4point(m,d[0],d[1],d[2]), col, e||0);
+  }
+  _corners(w,h,d){
+    const m = this.top, c = new Array(8);
+    for(let i=0;i<8;i++){
+      c[i] = m4point(m, (i&1? .5:-.5)*w, (i&2? .5:-.5)*h, (i&4? .5:-.5)*d);
+    }
+    return c;
+  }
+  boxCorners(c, col, e){
+    for(const f of BOX_FACES) this._face(c[f[0]], c[f[1]], c[f[2]], c[f[3]], col, e||0);
+  }
+  box(w,h,d, col, e){ this.boxCorners(this._corners(w,h,d), col, e); }
+  boxAt(x,y,z, w,h,d, col, e){
+    this.push(); this.t(x,y,z); this.box(w,h,d,col,e); this.pop();
+  }
+  /* absolute-space strut between two world points (ignores stack) */
+  between(p0,p1, w,h, col, e){
+    const d = v3norm(v3sub(p1,p0));
+    const ref = Math.abs(d[1])>0.9 ? [1,0,0] : [0,1,0];
+    const sx = v3norm(v3cross(ref,d));
+    const sy = v3cross(d,sx);
+    const c = new Array(8);
+    for(let i=0;i<8;i++){
+      const end = (i&1)? p1 : p0;
+      const fy = (i&2)? h/2 : -h/2, fz = (i&4)? w/2 : -w/2;
+      c[i] = [ end[0]+sy[0]*fy+sx[0]*fz, end[1]+sy[1]*fy+sx[1]*fz, end[2]+sy[2]*fy+sx[2]*fz ];
+    }
+    this.boxCorners(c, col, e||0);
+  }
+  /* truncated cone, axis Y, centered; caps: 1=bottom 2=top */
+  cyl(r0,r1,h,nSeg, col, e, caps){
+    if(caps === undefined) caps = 3;
+    const m = this.top, bot = [], top = [];
+    for(let k=0;k<=nSeg;k++){
+      const a = k/nSeg*TAU, ca = Math.cos(a), sa = Math.sin(a);
+      bot.push(m4point(m, r0*ca, -h/2, r0*sa));
+      top.push(m4point(m, r1*ca,  h/2, r1*sa));
+    }
+    for(let k=0;k<nSeg;k++){
+      this._face(bot[k], top[k], top[k+1], bot[k+1], col, e||0);
+    }
+    if(caps & 2){
+      const c = m4point(m,0,h/2,0);
+      for(let k=0;k<nSeg;k++) this.tri(c, top[k+1], top[k], col, e||0);
+    }
+    if(caps & 1){
+      const c = m4point(m,0,-h/2,0);
+      for(let k=0;k<nSeg;k++) this.tri(c, bot[k], bot[k+1], col, e||0);
+    }
+  }
+}
+
+/* soft ground shadow quads: pos(3) uv(2) alpha(1) = 6 floats */
+class ShadowBuilder{
+  constructor(cap){ this.f = new Float32Array(cap*6); this.n = 0; }
+  reset(){ this.n = 0; }
+  _v(x,y,z,u,v,a){
+    if((this.n+1)*6 > this.f.length){ const nf = new Float32Array(this.f.length*2); nf.set(this.f); this.f = nf; }
+    const i = this.n*6, f = this.f;
+    f[i]=x; f[i+1]=y; f[i+2]=z; f[i+3]=u; f[i+4]=v; f[i+5]=a;
+    this.n++;
+  }
+  /* ellipse footprint at (x,z), ground height y, radii rx/rz, rotated by rot, opacity a */
+  blob(x,y,z, rx,rz, rot, a){
+    const c = Math.cos(rot), s = Math.sin(rot);
+    const px = (u,v)=> x + (u*rx*c - v*rz*s);
+    const pz = (u,v)=> z + (u*rx*s + v*rz*c);
+    const uv = [[-1,-1],[1,-1],[1,1],[-1,1]];
+    const P = uv.map(q => [px(q[0],q[1]), y, pz(q[0],q[1]), q[0], q[1]]);
+    this._v(P[0][0],y,P[0][2],-1,-1,a); this._v(P[1][0],y,P[1][2],1,-1,a); this._v(P[2][0],y,P[2][2],1,1,a);
+    this._v(P[0][0],y,P[0][2],-1,-1,a); this._v(P[2][0],y,P[2][2],1,1,a); this._v(P[3][0],y,P[3][2],-1,1,a);
+  }
+}
+
+/* particles: pos(3) corner(2) rgba(4) size(1) = 10 floats, billboard quads */
+const PSTRIDE = 10;
+
+/* ================= WebGL ================= */
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl', {antialias:true, alpha:false, powerPreference:'high-performance'});
+if(!gl){ fatal('WebGL is not available in this browser.'); throw new Error('no webgl'); }
+canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); fatal('Graphics context was lost. Reload the page.'); });
+
+function compile(vsSrc, fsSrc, name){
+  function sh(type, src){
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+      throw new Error(name+' shader: '+gl.getShaderInfoLog(s));
+    }
+    return s;
+  }
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(name+' link: '+gl.getProgramInfoLog(p));
+  const u = {}, nU = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for(let i=0;i<nU;i++){ const inf = gl.getActiveUniform(p,i); u[inf.name.replace('[0]','')] = gl.getUniformLocation(p, inf.name); }
+  const a = {}, nA = gl.getProgramParameter(p, gl.ACTIVE_ATTRIBUTES);
+  for(let i=0;i<nA;i++){ const inf = gl.getActiveAttrib(p,i); a[inf.name] = gl.getAttribLocation(p, inf.name); }
+  return {p, u, a};
+}
+
+const FRAG_HEAD = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+`;
+
+const GEO = compile(`
+attribute vec3 aPos; attribute vec3 aNrm; attribute vec4 aCol; attribute float aCtr;
+uniform mat4 uVP;
+uniform float uScroll, uPeriod, uWrapOn, uFogDen;
+uniform vec3 uEye;
+varying vec3 vN; varying vec4 vC; varying float vFog;
+void main(){
+  vec3 p = aPos;
+  if(uWrapOn > 0.5){
+    float c = aCtr - uScroll;
+    c -= uPeriod * floor(c/uPeriod + 0.5);
+    p.x = c + (aPos.x - aCtr);
+  }
+  vN = aNrm; vC = aCol;
+  float d = distance(p, uEye);
+  vFog = 1.0 - exp(-d*uFogDen);
+  gl_Position = uVP * vec4(p, 1.0);
+}`, FRAG_HEAD + `
+uniform vec3 uSunDir, uSunCol, uAmbSky, uAmbGnd, uFogCol;
+varying vec3 vN; varying vec4 vC; varying float vFog;
+void main(){
+  vec3 n = normalize(vN);
+  float dif = max(dot(n, uSunDir), 0.0);
+  vec3 amb = mix(uAmbGnd, uAmbSky, n.y*0.5 + 0.5);
+  vec3 col = vC.rgb * (amb + uSunCol*dif);
+  col = mix(col, vC.rgb*1.35 + vec3(0.10,0.06,0.02), vC.a);   // emissive
+  col = mix(col, uFogCol, vFog);
+  col = pow(col * vec3(1.05,0.99,0.96), vec3(0.92));           // warm grade
+  gl_FragColor = vec4(col, 1.0);
+}`, 'geo');
+
+const SKY = compile(`
+attribute vec2 aXY;
+varying vec2 vUV;
+void main(){ vUV = aXY; gl_Position = vec4(aXY, 0.99995, 1.0); }
+`, FRAG_HEAD + `
+uniform vec3 uRight, uUp, uFwd, uSunDir, uMoonDir, uZen, uHor, uGlow;
+uniform float uTan, uAspect;
+varying vec2 vUV;
+void main(){
+  vec3 ray = normalize(uFwd + uRight*vUV.x*uTan*uAspect + uUp*vUV.y*uTan);
+  float h = max(ray.y, 0.0);
+  vec3 col = mix(uHor, uZen, pow(h, 0.52));
+  float sd = max(dot(ray, uSunDir), 0.0);
+  col += uGlow * (pow(sd, 5.0)*0.30 + pow(sd, 48.0)*0.55);
+  col += vec3(1.0,0.94,0.80) * smoothstep(0.99930, 0.99962, sd) * 1.5;
+  float md = max(dot(ray, uMoonDir), 0.0);
+  col += vec3(0.72,0.75,0.88) * smoothstep(0.99986, 0.99996, md) * 0.45;
+  col = mix(col, uHor, exp(-abs(ray.y)*8.0)*0.32);
+  col = pow(col * vec3(1.05,0.99,0.96), vec3(0.92));
+  gl_FragColor = vec4(col, 1.0);
+}`, 'sky');
+
+const PRT = compile(`
+attribute vec3 aP; attribute vec2 aC; attribute vec4 aCol; attribute float aSz;
+uniform mat4 uVP; uniform vec3 uRight, uUp, uEye; uniform float uFogDen;
+varying vec2 vUV; varying vec4 vCol; varying float vFog;
+void main(){
+  vec3 w = aP + (uRight*aC.x + uUp*aC.y)*aSz;
+  vUV = aC; vCol = aCol;
+  float d = distance(w, uEye);
+  vFog = 1.0 - exp(-d*uFogDen);
+  gl_Position = uVP * vec4(w, 1.0);
+}`, FRAG_HEAD + `
+uniform vec3 uFogCol;
+varying vec2 vUV; varying vec4 vCol; varying float vFog;
+void main(){
+  float r = length(vUV);
+  float a = vCol.a * (1.0 - smoothstep(0.18, 1.0, r));
+  vec3 col = mix(vCol.rgb, uFogCol, vFog*0.75);
+  col = pow(col * vec3(1.05,0.99,0.96), vec3(0.92));
+  gl_FragColor = vec4(col, a);
+}`, 'particles');
+
+const SHD = compile(`
+attribute vec3 aP; attribute vec2 aUV; attribute float aA;
+uniform mat4 uVP;
+varying vec2 vUV; varying float vA;
+void main(){ vUV = aUV; vA = aA; gl_Position = uVP * vec4(aP, 1.0); }
+`, FRAG_HEAD + `
+varying vec2 vUV; varying float vA;
+void main(){
+  float r = length(vUV);
+  float a = vA * (1.0 - smoothstep(0.30, 1.0, r));
+  gl_FragColor = vec4(0.13, 0.07, 0.10, a);
+}`, 'shadow');
+
+/* buffers */
+const bufStatic  = gl.createBuffer();
+const bufDynamic = gl.createBuffer();
+const bufShadow  = gl.createBuffer();
+const bufPart    = gl.createBuffer();
+const bufSky     = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, bufSky);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+
+function bindGeoAttribs(){
+  const S = VSTRIDE*4;
+  gl.enableVertexAttribArray(GEO.a.aPos);  gl.vertexAttribPointer(GEO.a.aPos, 3, gl.FLOAT, false, S, 0);
+  gl.enableVertexAttribArray(GEO.a.aNrm);  gl.vertexAttribPointer(GEO.a.aNrm, 3, gl.FLOAT, false, S, 12);
+  gl.enableVertexAttribArray(GEO.a.aCol);  gl.vertexAttribPointer(GEO.a.aCol, 4, gl.FLOAT, false, S, 24);
+  gl.enableVertexAttribArray(GEO.a.aCtr);  gl.vertexAttribPointer(GEO.a.aCtr, 1, gl.FLOAT, false, S, 40);
+}
+
+let DPR = Math.min(window.devicePixelRatio||1, 1.75);
+function resize(){
+  const w = Math.floor(canvas.clientWidth*DPR), h = Math.floor(canvas.clientHeight*DPR);
+  if(canvas.width!==w || canvas.height!==h){ canvas.width=w; canvas.height=h; gl.viewport(0,0,w,h); }
+}
+window.addEventListener('resize', resize);
+"use strict";
+/* ================= palette ================= */
+function C(hex){
+  return [ parseInt(hex.slice(1,3),16)/255, parseInt(hex.slice(3,5),16)/255, parseInt(hex.slice(5,7),16)/255 ];
+}
+const PAL = {
+  sand:C('#c08a52'), sandL:C('#d4a068'), sandD:C('#a4703f'), sage:C('#8d8a58'), rust:C('#a35f3f'),
+  dirt:C('#b07c4a'), ballast:C('#7a6752'), ballastD:C('#66543f'), tie:C('#4a3423'),
+  railWeb:C('#4a4a50'), railHead:C('#989ea9'),
+  mesa1:C('#b0603c'), mesa2:C('#c47b50'), mesa3:C('#96502f'), mesa4:C('#caa06a'),
+  cactus:C('#5a7442'), cactusD:C('#49613a'), bush:C('#6e6444'), rock:C('#8f7c60'), rockD:C('#77644c'),
+  pole:C('#5c4630'), cloud:C('#f6e2c2'),
+  locoBlk:C('#2a2b33'), smokebox:C('#22232a'), cabRed:C('#6e2f26'), roofGry:C('#3a352e'),
+  brass:C('#c9a24a'), steel:C('#8a8d98'), rodSteel:C('#aab0bc'), wheelRed:C('#6e2c24'),
+  frameBlk:C('#26262c'), coal:C('#181818'), coalL:C('#26262a'),
+  express:C('#44553c'), expressD:C('#38472f'), coach:C('#7b3a2e'), coachD:C('#65281e'),
+  caboose:C('#8a3020'), carRoof:C('#2e2a26'), window:C('#ffcf8a'), interior:C('#38200f'),
+  gold:C('#ffd977'), flash:C('#ffe9a8'), fire:C('#ff9a3c'),
+  skin:C('#b57f5c'), skinD:C('#9c6b4c'),
+  denim:C('#4a5a70'), denimD:C('#3c4a5e'),
+  duster1:C('#b3986e'), duster2:C('#7a5f45'), duster3:C('#8a8578'), duster4:C('#6e6a50'),
+  hatBrn:C('#4e3a28'), hatBlk:C('#26221f'), hatTan:C('#9a7f58'),
+  red:C('#b03a2e'), blue:C('#3f5e8a'),
+  leather:C('#6b4a2c'), leatherD:C('#54381f'), blanket1:C('#8a3b30'), blanket2:C('#3f5e8a'),
+  white:C('#e8e0d0'), guard:C('#3a4258'), tumble:C('#9a8054')
+};
+const HORSE_COATS = [
+  {body:C('#33302c'), mane:C('#1e1c1a'), points:C('#26241f')},                 // black — leader
+  {body:C('#6b4530'), mane:C('#2a211a'), points:C('#3a2b1d')},                 // bay
+  {body:C('#c69a5e'), mane:C('#e8d9b8'), points:C('#a87f4a')},                 // palomino
+  {body:C('#8a5638'), mane:C('#5e3722'), points:C('#6e4128')},                 // chestnut — the leaper
+  {body:C('#9a948c'), mane:C('#c8c2b8'), points:C('#767068')}                  // gray
+];
+
+/* ================= world constants ================= */
+const PERIOD = 720;              // scenery treadmill wrap length
+const RAIL_TOP = 0.78;
+const TRAIN_SPEED = 12.5;
+const SUN_DIR = v3norm([-0.38, 0.30, 0.90]);
+const MOON_DIR = v3norm([0.55, 0.42, -0.72]);
+const FOG_COL = C('#dfa473');
+const FOG_DEN = 0.0062;
+const SKY_ZEN = C('#31406c');
+const SKY_HOR = C('#f0ab62');
+const SKY_GLOW = C('#ffcf8e');
+const SUN_COL = [1.18, 0.86, 0.60];
+const AMB_SKY = [0.40, 0.36, 0.44];
+const AMB_GND = [0.34, 0.24, 0.17];
+/* ground shadow skew (long golden-hour cast) */
+const SHADOW_ROT = Math.atan2(-SUN_DIR[2], SUN_DIR[0]+0.001);
+function castShadow(SB, x, y, z, rx, rz, hgt, a){
+  SB.blob(x, y+0.02, z, rx, rz, 0, a);
+  const k = hgt*0.9;
+  SB.blob(x + SUN_DIR[0]/SUN_DIR[1]*-k*0.5, y+0.02, z + SUN_DIR[2]/SUN_DIR[1]*-k*0.5,
+          Math.max(rx, k*0.9), rz*0.8, SHADOW_ROT, a*0.5);
+}
+
+/* terrain height — periodic in x so the world can wrap */
+const TW = TAU/PERIOD;
+function terrH(x,z){
+  const az = Math.abs(z);
+  let h = 2.6*Math.sin(TW*3*x + 1.7 + 0.008*z)
+        + 1.9*Math.sin(TW*5*x - 0.6 + 0.013*z)
+        + 1.3*Math.sin(TW*11*x + 3.1 + 0.021*z)
+        + 0.5*Math.sin(TW*23*x + 0.9 + 0.15*z)
+        + 0.45*Math.sin(TW*45*x + 0.35*z);
+  h *= sstep(9, 34, az);
+  h += sstep(120, 300, az) * (7.5 + 3.5*Math.sin(TW*2*x + z*0.01));
+  return h;
+}
+
+/* ================= static scenery ================= */
+const SHADOW_STATIC = [];   // {x,z,rx,rz,h,a} in scenery space, wrapped per-frame
+
+function buildStatic(){
+  const B = new MeshBuilder(220000);
+  B.jit = 0.14;
+
+  /* --- terrain --- */
+  const STEP = 8;
+  for(let xi=-45; xi<45; xi++){
+    for(let zi=-40; zi<40; zi++){
+      const x0 = xi*STEP, z0 = zi*STEP, x1 = x0+STEP, z1 = z0+STEP;
+      const xc = x0+STEP/2, zc = z0+STEP/2;
+      B.ctr = xc;
+      const azc = Math.abs(zc);
+      let col;
+      if(azc < 10) col = PAL.dirt;
+      else{
+        const n = Math.sin(TW*7*xc + zc*0.05) + Math.sin(TW*13*xc - zc*0.043 + 2.0) + Math.sin(zc*0.11 + 0.7);
+        col = n > 1.5 ? PAL.sage : n < -1.55 ? PAL.rust : (n > 0.2 ? PAL.sand : (n < -0.7 ? PAL.sandD : PAL.sandL));
+      }
+      B.quad([x0,terrH(x0,z0),z0], [x0,terrH(x0,z1),z1], [x1,terrH(x1,z1),z1], [x1,terrH(x1,z0),z0], col, 0);
+    }
+  }
+
+  /* --- roadbed: ballast + ties + rails (8 segments of 90 m) --- */
+  for(let s=0; s<8; s++){
+    const cx = -PERIOD/2 + 45 + s*90;
+    B.ctr = cx;
+    B.boxAt(cx, 0.12, 0, 90, 0.24, 5.2, PAL.ballastD, 0);
+    B.boxAt(cx, 0.32, 0, 90, 0.16, 3.6, PAL.ballast, 0);
+    for(const sz of [-1,1]){
+      B.boxAt(cx, 0.64, sz*0.72, 90, 0.18, 0.08, PAL.railWeb, 0);
+      B.boxAt(cx, 0.755, sz*0.72, 90, 0.05, 0.10, PAL.railHead, 0.10);
+    }
+  }
+  B.jit = 0.10;
+  const NTIE = Math.floor(PERIOD/0.85);
+  for(let i=0;i<NTIE;i++){
+    const x = -PERIOD/2 + i*0.85;
+    B.ctr = x;
+    B.boxAt(x, 0.475, 0, 0.24, 0.15, 2.7, PAL.tie, 0);
+  }
+  B.jit = 0.14;
+
+  const rng = mulberry(1879);
+
+  /* --- telegraph poles + wires, far side of the track --- */
+  const NP = 24, PZ = -7.6, PSP = PERIOD/NP;
+  for(let i=0;i<NP;i++){
+    const x = -PERIOD/2 + i*PSP;
+    B.ctr = x;
+    B.push(); B.t(x, 0, PZ);
+    B.push(); B.t(0,3.1,0); B.cyl(0.09,0.07,6.2,6,PAL.pole,0,2); B.pop();
+    B.boxAt(0, 5.6, 0, 0.07, 0.09, 1.5, PAL.pole, 0);
+    B.boxAt(0, 5.15, 0, 0.07, 0.09, 1.5, PAL.pole, 0);
+    for(const sz of [-0.6, 0.6]){
+      B.boxAt(0, 5.70, sz, 0.06, 0.11, 0.06, PAL.white, 0.18);
+      B.boxAt(0, 5.25, sz, 0.06, 0.11, 0.06, PAL.white, 0.18);
+    }
+    B.pop();
+    /* wires to next pole */
+    for(const wy of [5.62, 5.17]){
+      for(const sz of [-0.6, 0.6]){
+        B.ctr = x + PSP/2;
+        B.between([x, wy, PZ+sz], [x+PSP, wy-0.12, PZ+sz], 0.022, 0.022, PAL.frameBlk, 0);
+      }
+    }
+    SHADOW_STATIC.push({x:x, z:PZ, rx:0.5, rz:0.5, h:5.2, a:0.30});
+  }
+
+  /* --- saguaro cacti --- */
+  for(let i=0;i<46;i++){
+    const x = (rng()-0.5)*PERIOD;
+    const zs = (rng()<0.5?-1:1), z = zs*(11 + rng()*110);
+    const y = terrH(x,z);
+    const hgt = 2.2 + rng()*2.6;
+    B.ctr = x;
+    B.push(); B.t(x,y,z); B.ry(rng()*TAU);
+    B.push(); B.t(0,hgt/2,0); B.cyl(0.20,0.15,hgt,7,PAL.cactus,0,2); B.pop();
+    const nArm = rng()<0.65 ? 1+Math.floor(rng()*2) : 0;
+    for(let a=0;a<nArm;a++){
+      const ah = hgt*(0.35+rng()*0.3), side = a%2? 1:-1;
+      B.push(); B.t(0,ah,side*0.16);
+      B.push(); B.rx(side*-1.25); B.t(0,0.3,0); B.cyl(0.12,0.11,0.6,6,PAL.cactusD,0,0); B.pop();
+      B.t(0, 0.25, side*0.5);
+      B.push(); B.t(0,0.55,0); B.cyl(0.12,0.09,1.1,6,PAL.cactus,0,2); B.pop();
+      B.pop();
+    }
+    B.pop();
+    if(Math.abs(z) < 70) SHADOW_STATIC.push({x:x, z:z, rx:0.5, rz:0.4, h:hgt, a:0.32});
+  }
+
+  /* --- rocks --- */
+  for(let i=0;i<44;i++){
+    const x = (rng()-0.5)*PERIOD;
+    const z = (rng()<0.5?-1:1)*(12 + rng()*160);
+    const y = terrH(x,z);
+    B.ctr = x;
+    B.push(); B.t(x,y,z); B.ry(rng()*TAU);
+    const n = 1+Math.floor(rng()*3);
+    for(let k=0;k<n;k++){
+      const s = 0.5+rng()*1.6;
+      B.push(); B.t((rng()-0.5)*2.0, s*0.26, (rng()-0.5)*1.6); B.ry(rng()*2); B.rz((rng()-0.5)*0.4);
+      B.box(s, s*0.62, s*0.8, rng()<0.5?PAL.rock:PAL.rockD, 0);
+      B.pop();
+    }
+    B.pop();
+  }
+
+  /* --- scrub brush --- */
+  for(let i=0;i<70;i++){
+    const x = (rng()-0.5)*PERIOD;
+    const z = (rng()<0.5?-1:1)*(9.5 + rng()*130);
+    const y = terrH(x,z);
+    B.ctr = x;
+    B.push(); B.t(x, y+0.22, z); B.ry(rng()*TAU);
+    B.box(0.8+rng()*0.7, 0.45, 0.7, PAL.bush, 0);
+    B.pop();
+  }
+
+  /* --- mesas on the horizon --- */
+  const MESA_BANDS = [PAL.mesa3, PAL.mesa1, PAL.mesa2, PAL.mesa4];
+  for(let i=0;i<13;i++){
+    const x = (i/13 + 0.3*rng()/13)*PERIOD - PERIOD/2;
+    const z = (rng()<0.55?-1:1)*(135 + rng()*160);
+    const y = terrH(x,z);
+    const W = 26 + rng()*52, H = 14 + rng()*16, nb = 3+Math.floor(rng()*2);
+    B.ctr = x;
+    B.push(); B.t(x,y,z); B.ry(rng()*0.8);
+    let cy = 0, w = W;
+    for(let b=0;b<nb;b++){
+      const bh = H*(b===nb-1? 0.2 : 0.8/nb) * (0.7+rng()*0.6);
+      B.push(); B.t((rng()-0.5)*3, cy+bh/2, (rng()-0.5)*3);
+      B.cyl(w*0.5, w*0.42, bh, 7+Math.floor(rng()*3), MESA_BANDS[b%4], 0, 2);
+      B.pop();
+      cy += bh; w *= 0.82;
+    }
+    B.pop();
+  }
+
+  /* --- water tower --- */
+  {
+    const x = 120, z = -14, y = terrH(x,z);
+    B.ctr = x;
+    B.push(); B.t(x,y,z);
+    for(const lx of [-1.1,1.1]) for(const lz of [-1.1,1.1])
+      B.boxAt(lx*0.8, 3.1, lz*0.8, 0.22, 6.2, 0.22, PAL.pole, 0);
+    B.boxAt(0, 5.4, 0, 2.9, 0.3, 2.9, PAL.leatherD, 0);
+    B.push(); B.t(0, 7.2, 0); B.cyl(1.7, 1.7, 3.2, 10, PAL.cabRed, 0, 3); B.pop();
+    B.push(); B.t(0, 9.3, 0); B.cyl(1.85, 0.2, 1.0, 10, PAL.roofGry, 0, 0); B.pop();
+    B.push(); B.t(0, 4.9, 1.5); B.rx(0.7); B.cyl(0.18,0.18,2.6,7,PAL.rodSteel,0,3); B.pop();
+    B.pop();
+    SHADOW_STATIC.push({x:x, z:z, rx:2.2, rz:2.2, h:9, a:0.35});
+  }
+
+  /* --- lineside shack + crates --- */
+  {
+    const x = 305, z = 13.5, y = terrH(x,z);
+    B.ctr = x;
+    B.push(); B.t(x,y,z); B.ry(-0.12);
+    B.boxAt(0, 1.3, 0, 4.6, 2.6, 3.4, PAL.duster2, 0);
+    B.push(); B.t(0, 2.75, 0); B.rz(0.06); B.box(5.2, 0.14, 4.0, PAL.roofGry, 0); B.pop();
+    B.boxAt(-1.2, 1.0, -1.72, 0.9, 2.0, 0.08, PAL.leatherD, 0);
+    B.boxAt(0.9, 1.6, -1.72, 0.8, 0.8, 0.06, PAL.window, 0.65);
+    for(const cx of [2.9, 3.6, 3.2]) B.boxAt(cx, 0.35, (cx*7)%1.4 - 0.7, 0.7,0.7,0.7, PAL.leather, 0);
+    B.pop();
+    SHADOW_STATIC.push({x:x, z:z, rx:3.0, rz:2.4, h:2.8, a:0.34});
+  }
+
+  /* --- low-poly clouds --- */
+  B.jit = 0.05;
+  for(let i=0;i<9;i++){
+    const x = (rng()-0.5)*PERIOD;
+    const z = (rng()-0.5)*440;
+    const y = 62 + rng()*48;
+    B.ctr = x;
+    B.push(); B.t(x,y,z);
+    const n = 2+Math.floor(rng()*3);
+    for(let k=0;k<n;k++){
+      B.boxAt((rng()-0.5)*26, (rng()-0.5)*3, (rng()-0.5)*8, 14+rng()*20, 1.6+rng()*2.2, 5+rng()*6, PAL.cloud, 0.22);
+    }
+    B.pop();
+  }
+
+  return {data: B.f.subarray(0, B.n*VSTRIDE), count: B.n};
+}
+
+/* ================= train ================= */
+/* driving / carrying wheel. Returns world pos of crank pin if pinR given. */
+function wheel(B, x, y, z, r, dist, spoked, pinR, phase){
+  const s = z>0 ? 1 : -1;
+  const spin = -dist/r;
+  B.push(); B.t(x,y,z); B.rx(s*Math.PI/2);
+  B.cyl(r, r, 0.11, spoked?14:10, PAL.frameBlk, 0, 3);           // tire
+  let pin = null;
+  B.push(); B.ry(s*(spin + (phase||0)));
+  if(spoked){
+    for(let k=0;k<4;k++){
+      B.push(); B.ry(k*Math.PI/4); B.box(r*1.82, 0.13, 0.06, PAL.wheelRed, 0); B.pop();
+    }
+    B.push(); B.t(-r*0.55, s*0.01, 0); B.box(r*0.62, 0.115, r*0.62, PAL.wheelRed, 0); B.pop(); // counterweight
+    B.cyl(r*0.17, r*0.17, 0.16, 8, PAL.frameBlk, 0, 3);          // hub
+  }else{
+    B.cyl(r*0.85, r*0.85, 0.115, 10, PAL.wheelRed, 0, 3);        // solid center
+  }
+  if(pinR){
+    B.push(); B.t(pinR, s*0.14, 0); B.cyl(0.055,0.055,0.18,6,PAL.rodSteel,0,3);
+    pin = B.wp(0, s*0.02, 0);
+    B.pop();
+  }
+  B.pop(); B.pop();
+  return pin;
+}
+
+function buildLoco(B, t, dist, fireFlicker){
+  /* local: rear face x=0, front x=11.4, on rails */
+  const F = PAL.frameBlk;
+  B.boxAt(5.4, 1.62, 0, 10.4, 0.28, 1.5, F, 0);
+  B.boxAt(5.4, 1.30, 0, 9.6, 0.4, 0.9, F, 0);
+
+  /* boiler + smokebox */
+  B.push(); B.t(5.5, 2.66, 0); B.rz(-Math.PI/2);
+  B.cyl(0.92, 0.92, 5.4, 14, PAL.locoBlk, 0, 0); B.pop();
+  for(const bx of [3.6, 4.9, 6.2, 7.4]){
+    B.push(); B.t(bx, 2.66, 0); B.rz(-Math.PI/2); B.cyl(0.945, 0.945, 0.09, 14, PAL.smokebox, 0, 0); B.pop();
+  }
+  B.push(); B.t(8.85, 2.66, 0); B.rz(-Math.PI/2); B.cyl(0.95, 0.95, 1.5, 14, PAL.smokebox, 0, 2); B.pop();
+  /* smokebox door + boiler backhead */
+  B.push(); B.t(9.62, 2.66, 0); B.rz(-Math.PI/2); B.cyl(0.72, 0.30, 0.14, 12, C('#2c2d34'), 0, 2); B.pop();
+  B.push(); B.t(2.82, 2.66, 0); B.rz(Math.PI/2); B.cyl(0.9, 0.9, 0.06, 14, C('#1c1c22'), 0, 2); B.pop();
+
+  /* diamond stack */
+  B.push(); B.t(8.85, 3.95, 0); B.cyl(0.19, 0.19, 0.7, 9, PAL.smokebox, 0, 0); B.pop();
+  B.push(); B.t(8.85, 4.62, 0); B.cyl(0.22, 0.55, 0.72, 9, PAL.locoBlk, 0, 0); B.pop();
+  B.push(); B.t(8.85, 5.05, 0); B.cyl(0.58, 0.42, 0.18, 9, PAL.brass, 0.08, 2); B.pop();
+
+  /* domes + bell + whistle */
+  B.push(); B.t(6.05, 3.82, 0); B.cyl(0.40, 0.34, 0.5, 9, PAL.brass, 0.10, 0); B.pop();
+  B.push(); B.t(6.05, 4.16, 0); B.cyl(0.36, 0.10, 0.22, 9, PAL.brass, 0.10, 2); B.pop();
+  B.push(); B.t(4.55, 3.72, 0); B.cyl(0.30, 0.27, 0.34, 9, PAL.brass, 0.10, 0); B.pop();
+  B.push(); B.t(4.55, 3.98, 0); B.cyl(0.28, 0.08, 0.18, 9, PAL.brass, 0.10, 2); B.pop();
+  B.boxAt(7.45, 3.80, 0, 0.06, 0.5, 0.06, PAL.brass, 0.1);
+  B.push(); B.t(7.45, 3.95, 0); B.cyl(0.14, 0.16, 0.20, 7, PAL.brass, 0.16, 3); B.pop();
+  B.boxAt(5.35, 3.86, 0, 0.05, 0.32, 0.05, PAL.brass, 0.1); // whistle
+  B.push(); B.t(5.35, 4.06, 0); B.cyl(0.07, 0.07, 0.24, 6, PAL.brass, 0.16, 2); B.pop();
+
+  /* running boards + handrails */
+  for(const sz of [-1,1]){
+    B.boxAt(5.6, 1.95, sz*1.12, 6.8, 0.06, 0.46, PAL.frameBlk, 0);
+    B.boxAt(6.2, 3.30, sz*1.00, 6.4, 0.035, 0.035, PAL.steel, 0.12);
+  }
+
+  /* headlamp */
+  B.boxAt(9.55, 3.86, 0, 0.42, 0.5, 0.44, PAL.locoBlk, 0);
+  B.boxAt(9.78, 3.86, 0, 0.03, 0.34, 0.30, PAL.window, 1.0);
+  B.boxAt(9.55, 4.14, 0, 0.46, 0.05, 0.48, PAL.brass, 0.1);
+
+  /* cab */
+  const CR = PAL.cabRed;
+  B.boxAt(1.7, 2.1, 0, 2.2, 0.5, 2.3, F, 0);
+  for(const sz of [-1,1]){
+    B.boxAt(1.7, 3.05, sz*1.11, 2.2, 1.7, 0.09, CR, 0);
+    B.boxAt(1.45, 3.35, sz*1.13, 0.75, 0.62, 0.045, PAL.window, 0.75);
+  }
+  B.boxAt(2.72, 3.2, 0, 0.09, 1.7, 2.3, CR, 0);
+  B.boxAt(2.79, 3.5, 0.62, 0.05, 0.5, 0.42, PAL.window, 0.75);
+  B.boxAt(2.79, 3.5, -0.62, 0.05, 0.5, 0.42, PAL.window, 0.75);
+  B.boxAt(1.7, 4.05, 0, 2.6, 0.12, 2.75, PAL.roofGry, 0);
+  /* firebox glow spilling from the cab */
+  B.boxAt(1.05, 2.75, 0, 0.1, 0.85, 1.1, PAL.fire, fireFlicker);
+
+  /* cylinders + valve gear */
+  const mainPin = [null, null];
+  for(const sz of [-1,1]){
+    const si = sz>0?0:1;
+    B.push(); B.t(7.35, 1.72, sz*0.98); B.rz(-Math.PI/2); B.cyl(0.30, 0.30, 1.05, 9, PAL.locoBlk, 0, 3); B.pop();
+    /* guide bars */
+    B.boxAt(6.35, 1.86, sz*0.98, 1.3, 0.04, 0.16, PAL.steel, 0.1);
+    const phase = sz>0 ? 0 : Math.PI/2;
+    const theta = -dist/0.72 + phase;
+    /* crosshead slides with the main crank */
+    const chx = 6.35 + 0.33*Math.cos(theta);
+    B.boxAt(chx, 1.72, sz*0.98, 0.3, 0.22, 0.14, PAL.rodSteel, 0.1);
+    B.between([6.9, 1.72, sz*0.98], [chx, 1.72, sz*0.98], 0.07, 0.07, PAL.rodSteel, 0.12); // piston rod
+    mainPin[si] = [chx, 1.72, sz*0.98];
+  }
+
+  /* drivers + rods */
+  const dr = 0.72;
+  for(const sz of [-1,1]){
+    const si = sz>0?0:1;
+    const phase = sz>0 ? 0 : Math.PI/2;
+    const pins = [];
+    for(const ax of [2.5, 4.3, 6.1]){
+      pins.push(wheel(B, ax, 1.5, sz*0.86, dr, dist, true, 0.30, phase));
+    }
+    B.between(pins[0], pins[2], 0.09, 0.12, PAL.rodSteel, 0.14);           // side rod
+    B.between(mainPin[si], pins[1], 0.08, 0.11, PAL.rodSteel, 0.14);       // main rod
+  }
+  /* pilot truck */
+  for(const sz of [-1,1]){
+    wheel(B, 8.35, 1.13, sz*0.78, 0.35, dist, false, 0, 0);
+    wheel(B, 9.25, 1.13, sz*0.78, 0.35, dist, false, 0, 0);
+  }
+  B.boxAt(8.8, 1.28, 0, 1.6, 0.18, 1.3, F, 0);
+
+  /* cowcatcher — V-plow of converging slats */
+  B.push(); B.t(10.15, 0, 0);
+  B.boxAt(0.1, 1.35, 0, 0.5, 0.34, 1.9, F, 0);
+  for(let k=0;k<5;k++){
+    for(const sz of [-1,1]){
+      const s0 = B.wp(0.16, 1.28, sz*(0.14+k*0.19));
+      const e0 = B.wp(1.28-k*0.17, 0.26, sz*(0.05+k*0.11));
+      B.between(s0, e0, 0.085, 0.06, PAL.cabRed, 0);
+    }
+  }
+  B.between(B.wp(0.16,1.28,0), B.wp(1.33,0.26,0), 0.09, 0.07, PAL.cabRed, 0);   // center slat
+  B.between(B.wp(1.05,0.30,0.62), B.wp(1.05,0.30,-0.62), 0.06, 0.06, PAL.cabRed, 0); // cross brace
+  B.pop();
+}
+
+function buildTender(B, t, dist){
+  /* local x 0..6.2 */
+  B.boxAt(3.1, 1.62, 0, 6.0, 0.3, 1.6, PAL.frameBlk, 0);
+  B.boxAt(3.1, 2.62, 0, 5.8, 1.75, 2.55, PAL.cabRed, 0);
+  B.boxAt(3.1, 3.30, 0, 5.84, 0.10, 2.59, PAL.brass, 0.08);
+  /* coal heap */
+  const cs = [[2.3,3.62,0.3],[3.4,3.72,-0.4],[4.1,3.58,0.5],[2.9,3.85,-0.1],[3.7,3.6,0.1],[2.0,3.5,-0.6]];
+  for(let i=0;i<cs.length;i++){
+    B.push(); B.t(cs[i][0], cs[i][1], cs[i][2]); B.ry(i*0.9); B.rz(0.2);
+    B.box(1.4, 0.55, 1.5, i%2?PAL.coal:PAL.coalL, 0);
+    B.pop();
+  }
+  B.push(); B.t(5.3, 3.62, 0.8); B.cyl(0.3,0.3,0.2,8,PAL.cabRed,0,2); B.pop();
+  for(const bx of [1.6, 4.6]){
+    B.boxAt(bx, 1.32, 0, 1.9, 0.34, 1.9, PAL.frameBlk, 0);
+    for(const sz of [-1,1]){
+      wheel(B, bx-0.55, 1.2, sz*0.98, 0.42, dist, false, 0, 0);
+      wheel(B, bx+0.55, 1.2, sz*0.98, 0.42, dist, false, 0, 0);
+    }
+  }
+}
+
+/* generic car. kind: 'coach' | 'express' | 'caboose' */
+function buildCar(B, kind, t, dist){
+  const L = kind==='caboose' ? 7.4 : 11.4;
+  const bodyY0 = 1.72, bodyH = 2.5, W = 2.66;
+  const col  = kind==='coach' ? PAL.coach : kind==='express' ? PAL.express : PAL.caboose;
+  const colD = kind==='coach' ? PAL.coachD : kind==='express' ? PAL.expressD : PAL.coachD;
+
+  B.boxAt(L/2, 1.60, 0, L-0.3, 0.22, 1.7, PAL.frameBlk, 0);
+  if(kind !== 'express') B.boxAt(L/2, bodyY0+bodyH/2, 0, L-0.6, bodyH, W, col, 0);
+
+  /* trucks */
+  for(const bx of [1.7, L-1.7]){
+    B.boxAt(bx, 1.32, 0, 2.0, 0.34, 1.95, PAL.frameBlk, 0);
+    for(const sz of [-1,1]){
+      wheel(B, bx-0.6, 1.2, sz*0.99, 0.42, dist, false, 0, 0);
+      wheel(B, bx+0.6, 1.2, sz*0.99, 0.42, dist, false, 0, 0);
+    }
+  }
+
+  /* letterboard + pinstripe */
+  B.boxAt(L/2, bodyY0+bodyH-0.28, 0, L-0.55, 0.34, W+0.03, colD, 0);
+  B.boxAt(L/2, bodyY0+bodyH-0.50, 0, L-0.6, 0.035, W+0.045, PAL.brass, 0.12);
+
+  if(kind==='coach'){
+    /* windows */
+    for(let k=0;k<7;k++){
+      const wx = 1.75 + k*(L-3.5)/6;
+      for(const sz of [-1,1]) B.boxAt(wx, bodyY0+1.28, sz*(W/2+0.01), 0.62, 0.82, 0.03, PAL.window, 0.82);
+    }
+    /* clerestory */
+    B.boxAt(L/2, bodyY0+bodyH+0.06, 0, L-0.4, 0.12, W+0.24, PAL.carRoof, 0);
+    B.boxAt(L/2, bodyY0+bodyH+0.33, 0, L-2.2, 0.42, 1.35, colD, 0);
+    for(let k=0;k<8;k++){
+      const wx = 2.1 + k*(L-4.2)/7;
+      for(const sz of [-1,1]) B.boxAt(wx, bodyY0+bodyH+0.33, sz*0.69, 0.5, 0.2, 0.02, PAL.window, 0.6);
+    }
+    B.boxAt(L/2, bodyY0+bodyH+0.58, 0, L-1.9, 0.09, 1.7, PAL.carRoof, 0);
+    B.boxAt(L/2, bodyY0+bodyH+0.66, 0, L-2.4, 0.055, 0.55, PAL.leather, 0);   // roof walk
+  }
+
+  if(kind==='express'){
+    const dwX = L/2, doorW = 2.05, doorH = 2.0;
+    /* composed walls so the sliding door is a REAL opening */
+    B.boxAt(dwX, bodyY0+bodyH/2, -W/2+0.06, L-0.6, bodyH, 0.12, col, 0);                       // far wall
+    const lw = dwX - doorW/2 - 0.3;
+    B.boxAt(0.3+lw/2, bodyY0+bodyH/2, W/2-0.06, lw, bodyH, 0.12, col, 0);                      // near wall, left of door
+    const rw = (L-0.3) - (dwX + doorW/2);
+    B.boxAt(dwX+doorW/2+rw/2, bodyY0+bodyH/2, W/2-0.06, rw, bodyH, 0.12, col, 0);              // near wall, right of door
+    B.boxAt(dwX, bodyY0+doorH+(bodyH-doorH)/2, W/2-0.06, doorW, bodyH-doorH, 0.12, col, 0);    // header
+    B.boxAt(0.35, bodyY0+bodyH/2, 0, 0.12, bodyH, W-0.1, col, 0);                              // ends
+    B.boxAt(L-0.35, bodyY0+bodyH/2, 0, 0.12, bodyH, W-0.1, col, 0);
+    B.boxAt(L/2, bodyY0+0.06, 0, L-0.6, 0.12, W-0.1, C('#3a2c1e'), 0);                         // floor
+    /* lamplit interior */
+    B.boxAt(dwX, bodyY0+1.15, -W/2+0.15, 2.8, 2.0, 0.04, C('#2a1808'), 0.10);
+    B.boxAt(dwX+0.85, bodyY0+2.02, -0.35, 0.13, 0.20, 0.13, PAL.window, 0.9);                  // hanging lamp
+    B.boxAt(dwX-0.62, bodyY0+0.60, -0.52, 0.85, 0.95, 0.75, C('#42444c'), 0);                  // the safe
+    B.boxAt(dwX-0.62, bodyY0+0.74, -0.13, 0.17, 0.17, 0.035, PAL.gold, 0.9);                   // dial catching lamplight
+    B.boxAt(dwX+0.62, bodyY0+0.32, 0.18, 0.62, 0.52, 0.5, PAL.leather, 0);                     // strongbox
+    B.boxAt(dwX-1.0, bodyY0+2.16, W/2+0.07, 4.2, 0.08, 0.05, PAL.brass, 0.1);                  // door rail
+    B.boxAt(dwX-2.12, bodyY0+1.06, W/2+0.05, 2.0, doorH, 0.07, colD, 0);                       // slid-open panel
+    /* board-and-batten, skipping the doorway */
+    for(let k=0;k<Math.floor(L/0.62);k++){
+      const wx = 0.65 + k*0.62;
+      B.boxAt(wx, bodyY0+bodyH/2-0.15, -(W/2+0.015), 0.07, bodyH-0.75, 0.03, k%2?colD:PAL.expressD, 0);
+      if(Math.abs(wx-dwX) > 1.16) B.boxAt(wx, bodyY0+bodyH/2-0.15, W/2+0.015, 0.07, bodyH-0.75, 0.03, k%2?colD:PAL.expressD, 0);
+    }
+    /* small end windows */
+    for(const sz of [-1,1]) B.boxAt(L-1.0, bodyY0+1.5, sz*(W/2+0.01), 0.5, 0.5, 0.03, PAL.window, 0.7);
+    B.boxAt(L/2, bodyY0+bodyH+0.10, 0, L-0.3, 0.2, W+0.2, PAL.carRoof, 0);
+    B.boxAt(L/2, bodyY0+bodyH+0.25, 0, L-1.6, 0.055, 0.55, PAL.leather, 0);        // roof walk
+  }
+
+  if(kind==='caboose'){
+    for(let k=0;k<Math.floor(L/0.62);k++){
+      const wx = 0.65 + k*0.62;
+      for(const sz of [-1,1]) B.boxAt(wx, bodyY0+bodyH/2-0.15, sz*(W/2+0.015), 0.07, bodyH-0.75, 0.03, k%2?PAL.coachD:PAL.caboose, 0);
+    }
+    for(const sz of [-1,1]){
+      B.boxAt(2.0, bodyY0+1.25, sz*(W/2+0.01), 0.55, 0.62, 0.03, PAL.window, 0.8);
+      B.boxAt(L-2.0, bodyY0+1.25, sz*(W/2+0.01), 0.55, 0.62, 0.03, PAL.window, 0.8);
+    }
+    B.boxAt(L/2, bodyY0+bodyH+0.08, 0, L-0.3, 0.16, W+0.2, PAL.carRoof, 0);
+    /* cupola */
+    B.boxAt(L/2, bodyY0+bodyH+0.62, 0, 2.1, 0.95, 1.9, PAL.caboose, 0);
+    for(const sz of [-1,1]) B.boxAt(L/2, bodyY0+bodyH+0.70, sz*0.96, 1.6, 0.5, 0.03, PAL.window, 0.85);
+    B.boxAt(L/2+1.06, bodyY0+bodyH+0.70, 0, 0.03, 0.5, 1.4, PAL.window, 0.85);
+    B.boxAt(L/2, bodyY0+bodyH+1.16, 0, 2.4, 0.12, 2.2, PAL.carRoof, 0);
+    /* chimney, rear platform, markers */
+    B.push(); B.t(1.6, bodyY0+bodyH+0.45, 0.5); B.cyl(0.09,0.09,0.7,6,PAL.frameBlk,0,2); B.pop();
+    B.boxAt(-0.35, 1.62, 0, 0.75, 0.1, 2.3, PAL.frameBlk, 0);
+    for(const sz of [-1,1]){
+      B.boxAt(-0.68, 2.15, sz*1.05, 0.06, 1.0, 0.06, PAL.frameBlk, 0);
+      B.boxAt(-0.35, 2.62, sz*1.05, 0.72, 0.05, 0.05, PAL.frameBlk, 0);
+    }
+    B.boxAt(-0.68, 2.62, 0, 0.05, 0.05, 2.1, PAL.frameBlk, 0);
+    for(const sz of [-1,1]) B.boxAt(-0.72, 3.0, sz*0.9, 0.09, 0.12, 0.09, C('#ff5040'), 0.95);
+  }
+
+  /* couplers */
+  B.boxAt(-0.25, 1.45, 0, 0.5, 0.16, 0.22, PAL.frameBlk, 0);
+  B.boxAt(L+0.25, 1.45, 0, 0.5, 0.16, 0.22, PAL.frameBlk, 0);
+}
+
+/* consist layout: [kind, rearX, length] built rear→front */
+const CONSIST = [
+  ['caboose', 1.0, 7.4],
+  ['coach',   9.2, 11.4],
+  ['coach',  21.4, 11.4],
+  ['express',33.6, 11.4],
+  ['tender', 45.8, 6.2],
+  ['loco',   52.8, 11.4]
+];
+const EXPRESS_X = 33.6, EXPRESS_DOOR_X = EXPRESS_X + 5.7;
+const EXPRESS_ROOF_Y = 1.72 + 2.5 + 0.25 + 0.03;
+const TENDER_TOP_Y = 3.62;
+
+function buildTrain(B, t, dist, fireFlicker){
+  for(let i=0;i<CONSIST.length;i++){
+    const [kind, x0] = CONSIST[i];
+    B.push();
+    /* gentle hunting sway, per vehicle */
+    const roll = 0.0065*Math.sin(t*1.9 + i*2.3) + 0.004*Math.sin(t*3.1 + i*1.1);
+    const bounce = 0.015*Math.sin(t*2.6 + i*1.9);
+    B.t(x0, bounce, 0);
+    B.rx(roll);
+    if(kind==='loco') buildLoco(B, t, dist, fireFlicker);
+    else if(kind==='tender') buildTender(B, t, dist);
+    else buildCar(B, kind, t, dist);
+    B.pop();
+  }
+}
+"use strict";
+/* ================= human figure =================
+   origin = pelvis center, facing +x. Caller positions/rotates the stack.
+   F: {col:{coat,shirt,pants,skin,hat,bandana,boot}, hatType:'brim'|'cap'|null,
+       lean, legs:{hipL,kneeL,hipR,kneeR,spread}, armL:{rx,rz,elb}, armR:{rx,rz,elb},
+       gun:null|'rev'|'rifle', flash:0..1, coatFlap, bandanaFlap, headPitch}
+   returns {handL, handR, muzzle} world positions                         */
+function figure(B, F){
+  const col = F.col, out = {handL:null, handR:null, muzzle:null};
+  /* pelvis + belt */
+  B.box(0.30, 0.18, 0.33, col.pants, 0);
+  B.boxAt(0, 0.10, 0, 0.31, 0.055, 0.34, PAL.leatherD, 0);
+  /* legs */
+  const L = F.legs;
+  for(const sd of [-1,1]){
+    const hip = sd<0 ? L.hipL : L.hipR, knee = sd<0 ? L.kneeL : L.kneeR;
+    B.push(); B.t(0, -0.05, sd*0.115);
+    B.rx(sd*(L.spread||0)); B.rz(hip);
+    B.boxAt(0, -0.185, 0, 0.135, 0.37, 0.135, col.pants, 0);
+    B.t(0, -0.35, 0); B.rz(knee);
+    B.boxAt(0, -0.16, 0, 0.115, 0.32, 0.115, col.pants, 0);
+    B.boxAt(0.055, -0.345, 0, 0.21, 0.09, 0.105, col.boot, 0);
+    B.pop();
+  }
+  /* torso */
+  B.push(); B.t(0, 0.08, 0); B.rz(-(F.lean||0));
+  B.boxAt(0, 0.27, 0, 0.30, 0.54, 0.375, col.coat, 0);
+  B.boxAt(0.145, 0.30, 0, 0.03, 0.40, 0.17, col.shirt, 0);            // open coat / shirt front
+  B.boxAt(0.145, 0.12, 0.05, 0.025, 0.08, 0.07, PAL.brass, 0.12);     // watch chain glint
+  /* coat skirt flaps */
+  const fl = F.coatFlap||0;
+  B.push(); B.t(-0.15, 0.02, 0); B.rz(0.45 + fl); B.boxAt(0, -0.22, 0, 0.055, 0.46, 0.34, col.coat, 0); B.pop();
+  for(const sd of [-1,1]){
+    B.push(); B.t(-0.02, 0.0, sd*0.185); B.rx(sd*(0.24+fl*0.8)); B.rz(0.15);
+    B.boxAt(0, -0.19, 0, 0.14, 0.40, 0.05, col.coat, 0); B.pop();
+  }
+  /* head */
+  B.push(); B.t(0, 0.60, 0); B.rz((F.headPitch||0) + (F.lean||0)*0.55);
+  B.boxAt(0, 0.10, 0, 0.195, 0.235, 0.195, col.skin, 0);
+  B.boxAt(0.02, 0.035, 0, 0.20, 0.115, 0.205, col.bandana, 0);        // bandana over the face
+  B.push(); B.t(-0.11, 0.02, 0); B.rz(-0.5 - (F.bandanaFlap||0)); B.boxAt(0, -0.10, 0, 0.03, 0.20, 0.13, col.bandana, 0); B.pop();
+  if(F.hatType === 'brim'){
+    B.push(); B.t(0.005, 0.235, 0); B.cyl(0.235, 0.235, 0.028, 9, col.hat, 0, 3); B.pop();
+    B.boxAt(0, 0.32, 0, 0.195, 0.155, 0.175, col.hat, 0);
+    B.boxAt(0, 0.40, 0, 0.15, 0.045, 0.13, col.hat, 0);
+  }else if(F.hatType === 'cap'){
+    B.boxAt(0, 0.245, 0, 0.20, 0.09, 0.20, col.hat, 0);
+    B.boxAt(0.13, 0.215, 0, 0.10, 0.02, 0.16, col.hat, 0);
+  }
+  B.pop();
+  /* arms */
+  for(const sd of [-1,1]){
+    const A = sd<0 ? F.armL : F.armR;
+    B.push(); B.t(0, 0.50, sd*0.225);
+    B.rx(sd*(A.rx||0)); B.rz(A.rz||0);
+    B.boxAt(0, -0.16, 0, 0.10, 0.32, 0.10, col.coat, 0);
+    B.t(0, -0.31, 0); B.rz(A.elb||0);
+    B.boxAt(0, -0.13, 0, 0.088, 0.26, 0.088, col.coat, 0);
+    B.boxAt(0, -0.30, 0, 0.085, 0.09, 0.085, col.skin, 0);
+    const hand = B.wp(0, -0.30, 0);
+    if(sd<0) out.handL = hand; else out.handR = hand;
+    if(sd>0 && F.gun){
+      /* weapon along the forearm axis, muzzle past the fist */
+      const gunCol = C('#33343c');
+      if(F.gun === 'rev'){
+        B.boxAt(0, -0.475, 0.0, 0.05, 0.27, 0.045, gunCol, 0);
+        B.boxAt(0.035, -0.36, 0, 0.075, 0.10, 0.06, gunCol, 0);
+        out.muzzle = B.wp(0, -0.62, 0);
+      }else{
+        B.boxAt(0, -0.60, 0, 0.055, 0.62, 0.05, gunCol, 0);
+        B.boxAt(0.05, -0.34, 0, 0.12, 0.14, 0.055, PAL.leather, 0);   // stock
+        B.boxAt(-0.03, -0.42, 0, 0.05, 0.09, 0.04, gunCol, 0);        // lever
+        out.muzzle = B.wp(0, -0.93, 0);
+      }
+      if(F.flash > 0){
+        const f = F.flash;
+        const my = F.gun==='rev' ? -0.66 : -0.97;
+        B.boxAt(0, my-0.20*f, 0, 0.055, 0.52*f, 0.055, PAL.flash, 1);
+        B.boxAt(0, my, 0, 0.40*f, 0.06, 0.05, PAL.flash, 1);
+        B.boxAt(0, my, 0, 0.05, 0.06, 0.40*f, PAL.flash, 1);
+      }
+    }
+    B.pop();
+  }
+  B.pop(); /* torso */
+  return out;
+}
+
+/* pose helpers */
+function poseRiding(stand){
+  return {
+    hipL: lerp(1.02, 0.18, stand), kneeL: lerp(-1.55, -0.22, stand),
+    hipR: lerp(1.02, 0.18, stand), kneeR: lerp(-1.55, -0.22, stand),
+    spread: lerp(0.40, 0.15, stand)
+  };
+}
+function armDown(){ return {rx:0.10, rz:0.12, elb:-0.25}; }
+function armRein(){ return {rx:0.15, rz:0.72, elb:-0.92}; }
+function armGun(raise, recoil){
+  return {rx:0.42*raise, rz:0.14 + (2.30 + recoil*0.55)*raise, elb:0.22*raise - 0.18};
+}
+
+/* ================= horse + mounted bandit ================= */
+/* H: {x,z,yaw, stride, coat, blazeOn, blanket, rider:null|{...}, stand, gunRaise, recoil, flash, signal} */
+function buildHorse(B, H, t){
+  const p = H.stride, coat = H.coat;
+  const bobY = 0.10*Math.pow(Math.max(0, Math.sin(TAU*p + 0.9)), 1.6) + 0.02;
+  const pitch = 0.055*Math.sin(TAU*p + 0.35);
+  const out = {};
+
+  B.push();
+  B.t(H.x, bobY, H.z);
+  B.ry(H.yaw||0);
+  B.rz(pitch);
+
+  /* barrel */
+  B.boxAt(0.24, 1.27, 0, 1.02, 0.66, 0.50, coat.body, 0);
+  B.boxAt(-0.44, 1.24, 0, 0.80, 0.58, 0.45, coat.body, 0);
+  B.boxAt(0.34, 0.98, 0, 0.55, 0.28, 0.38, coat.body, 0);
+  B.boxAt(-0.72, 1.38, 0, 0.30, 0.34, 0.36, coat.body, 0);   // croup
+
+  /* neck + head (record bit points for the reins) */
+  B.push(); B.t(0.58, 1.42, 0); B.rz(0.82 + 0.10*Math.sin(TAU*p + 2.1));
+  B.boxAt(0.30, 0.04, 0, 0.68, 0.38, 0.30, coat.body, 0);
+  for(let k=0;k<3;k++) B.boxAt(0.12+k*0.20, 0.245, 0, 0.18, 0.13, 0.07, coat.mane, 0);
+  B.t(0.64, 0.10, 0); B.rz(-1.02);
+  B.boxAt(0.06, 0, 0, 0.30, 0.27, 0.235, coat.body, 0);
+  B.boxAt(0.31, -0.03, 0, 0.24, 0.185, 0.175, coat.points, 0);        // muzzle
+  if(H.blazeOn) B.boxAt(0.22, 0.12, 0, 0.30, 0.035, 0.075, PAL.white, 0.05);
+  for(const sd of [-1,1]){
+    B.boxAt(0.10, 0.085, sd*0.122, 0.035, 0.05, 0.02, C('#141210'), 0.06);   // eye
+    B.push(); B.t(-0.06, 0.16, sd*0.07); B.rz(0.35); B.box(0.05, 0.17, 0.045, coat.body, 0); B.pop();
+    B.boxAt(0.11, -0.02, sd*0.125, 0.26, 0.03, 0.016, PAL.leatherD, 0);      // cheek strap
+  }
+  out.bitL = B.wp(0.30, -0.07, 0.10);
+  out.bitR = B.wp(0.30, -0.07, -0.10);
+  B.pop();
+
+  /* tail */
+  B.push(); B.t(-0.86, 1.44, 0); B.rz(2.55 + 0.10*Math.sin(TAU*p));
+  for(let k=0;k<3;k++){
+    B.boxAt(0.15, 0, 0, 0.32, 0.13-0.03*k, 0.10-0.02*k, coat.mane, 0);
+    B.t(0.29, 0, 0); B.rz(-0.42 + 0.13*Math.sin(TAU*p - 0.9*k));
+  }
+  B.pop();
+
+  /* legs — rotary gallop */
+  const OFFS = [[false,-1,0.00],[false,1,0.13],[true,-1,0.48],[true,1,0.61]];  // [front, side, phase]
+  for(const [front, sd, off] of OFFS){
+    const ph = TAU*(p+off);
+    const u = front ? 0.56*Math.cos(ph)+0.10 : 0.62*Math.cos(ph)-0.12;
+    const fold = (front?1.30:1.00) * Math.pow(Math.max(0, Math.sin(ph+2.2)), 1.5);
+    const px = front ? 0.52 : -0.55, py = front ? 1.18 : 1.24;
+    B.push(); B.t(px, py, sd*0.165); B.rz(u);
+    B.boxAt(0, -0.25, 0, 0.145, 0.50, 0.125, coat.body, 0);
+    B.t(0, -0.50, 0); B.rz(-fold);
+    B.boxAt(0, -0.205, 0, 0.105, 0.41, 0.09, coat.points, 0);
+    B.t(0, -0.41, 0); B.rz(fold*0.35);
+    B.boxAt(0.02, -0.045, 0, 0.15, 0.10, 0.115, C('#211a14'), 0);
+    B.pop();
+  }
+
+  /* tack */
+  B.boxAt(-0.02, 1.585, 0, 0.62, 0.04, 0.62, H.blanket, 0);
+  B.boxAt(-0.02, 1.635, 0, 0.46, 0.09, 0.38, PAL.leather, 0);
+  B.boxAt(0.20, 1.70, 0, 0.075, 0.10, 0.11, PAL.leatherD, 0);
+  B.boxAt(-0.25, 1.71, 0, 0.075, 0.13, 0.31, PAL.leatherD, 0);
+  for(const sd of [-1,1]){
+    B.boxAt(0.02, 1.30, sd*0.265, 0.055, 0.56, 0.03, PAL.leatherD, 0);   // girth
+    const flap = H.rider ? 0 : 0.5*Math.sin(TAU*p + sd);
+    B.push(); B.t(0.06, 1.60, sd*0.30); B.rx(sd*0.1 + flap);
+    B.boxAt(0, -0.21, 0, 0.05, 0.42, 0.03, PAL.leather, 0);
+    B.boxAt(0, -0.44, 0, 0.10, 0.10, 0.055, PAL.steel, 0.12);
+    B.pop();
+    B.boxAt(-0.42, 1.50, sd*0.255, 0.25, 0.27, 0.10, PAL.leatherD, 0);   // saddlebags
+  }
+  B.push(); B.t(-0.36, 1.72, 0); B.rx(Math.PI/2); B.cyl(0.10, 0.10, 0.46, 7, PAL.duster3, 0, 3); B.pop();  // bedroll
+  B.push(); B.t(0.30, 1.44, -0.29); B.rz(-0.5);
+  B.box(0.58, 0.11, 0.075, PAL.leatherD, 0);
+  B.boxAt(0.34, 0.05, 0, 0.18, 0.13, 0.06, PAL.leather, 0);
+  B.pop();
+
+  /* rider */
+  if(H.rider){
+    const R = H.rider;
+    const stand = H.stand||0;
+    B.push();
+    B.t(-0.02, 1.70 + stand*0.24 - 0.02*Math.sin(TAU*p + 1.1), 0);
+    B.rz(0.03*Math.sin(TAU*p + 2.6));
+    const raise = H.gunRaise||0;
+    const armR = H.signal ? {rx:0.15, rz:2.95, elb:0.15} : (raise>0.02 ? armGun(raise, H.recoil||0) : armDown());
+    const hands = figure(B, {
+      col: R.col, hatType:'brim',
+      lean: 0.38 - stand*0.22,
+      legs: poseRiding(stand),
+      armL: armRein(), armR: armR,
+      gun: R.gun, flash: H.flash||0,
+      coatFlap: 0.16 + 0.10*Math.sin(TAU*p + 0.5),
+      bandanaFlap: 0.35 + 0.22*Math.sin(t*7 + H.z),
+      headPitch: -0.06
+    });
+    B.pop();
+    if(hands.handL){
+      B.between(out.bitL, hands.handL, 0.018, 0.018, PAL.leatherD, 0);
+      B.between(out.bitR, hands.handL, 0.018, 0.018, PAL.leatherD, 0);
+    }
+    out.muzzle = hands.muzzle;
+  }else{
+    /* reins tied forward to the horn */
+    const horn = B.wp(0.20, 1.76, 0);
+    B.between(out.bitL, horn, 0.018, 0.018, PAL.leatherD, 0);
+    B.between(out.bitR, horn, 0.018, 0.018, PAL.leatherD, 0);
+  }
+  B.pop();
+  return out;
+}
+
+/* free bandit (leaper in flight / crouching on the cars) */
+function buildFreeBandit(B, pose){
+  B.push();
+  B.t(pose.x, pose.y, pose.z);
+  B.ry(pose.yaw||0);
+  B.rz(pose.pitch||0);
+  const run = pose.runPhase;
+  let legs, armL, armR, lean;
+  if(pose.mode === 'tuck'){
+    legs = {hipL:1.9, kneeL:-2.2, hipR:1.65, kneeR:-2.05, spread:0.18};
+    armL = {rx:0.5, rz:1.9, elb:-0.5}; armR = {rx:0.5, rz:2.1, elb:-0.4}; lean = 0.85;
+  }else if(pose.mode === 'run'){
+    const s = Math.sin(TAU*run), c = Math.sin(TAU*run + Math.PI);
+    legs = {hipL:0.55+0.62*s, kneeL:-0.75-0.75*Math.max(0,-s), hipR:0.55+0.62*c, kneeR:-0.75-0.75*Math.max(0,-c), spread:0.12};
+    armL = {rx:1.15, rz:0.35, elb:-0.45}; armR = {rx:1.15, rz:0.35, elb:-0.45};  // balancing arms out
+    lean = 0.5;
+  }else if(pose.mode === 'threat'){
+    legs = {hipL:1.35, kneeL:-1.7, hipR:0.75, kneeR:-1.0, spread:0.22};
+    armL = {rx:0.35, rz:0.4, elb:-0.6}; armR = {rx:0.06, rz:1.62, elb:0.05}; lean = 0.35;
+  }else{ /* crouch */
+    legs = {hipL:1.5, kneeL:-1.9, hipR:1.25, kneeR:-1.6, spread:0.2};
+    armL = {rx:0.6, rz:0.5, elb:-0.7}; armR = {rx:0.3, rz:0.8, elb:-0.7}; lean = 0.6;
+  }
+  const hands = figure(B, {
+    col: pose.col, hatType:'brim',
+    lean: lean, legs: legs, armL: armL, armR: armR,
+    gun: pose.gun||null, flash: pose.flash||0,
+    coatFlap: pose.flap!==undefined ? pose.flap : 0.5,
+    bandanaFlap: 0.5, headPitch: pose.headPitch||0
+  });
+  B.pop();
+  return hands;
+}
+
+/* express-car messenger + cupola guard */
+function buildGuard(B, g, t){
+  B.push();
+  B.t(g.x, g.y, g.z);
+  B.ry(g.yaw);
+  const hands = figure(B, {
+    col: {coat:PAL.guard, shirt:C('#6b7080'), pants:C('#2e3442'), skin:PAL.skin, hat:C('#23262e'), bandana:PAL.guard, boot:C('#1c1e24')},
+    hatType:'cap',
+    lean: 0.28,
+    legs: {hipL:1.5, kneeL:-1.85, hipR:0.9, kneeR:-1.05, spread:0.2},
+    armL: {rx:0.4, rz:1.15, elb:-0.9},
+    armR: {rx:0.08, rz:1.30, elb:-0.15},
+    gun:'rifle', flash: g.flash||0,
+    coatFlap: 0, bandanaFlap: 0, headPitch: -0.12
+  });
+  B.pop();
+  return hands;
+}
+
+/* ================= incidentals ================= */
+function buildWindmill(B, x, y, z, t){
+  B.push(); B.t(x, y, z);
+  for(const [lx,lz] of [[-1,-1],[1,-1],[1,1],[-1,1]]){
+    B.push(); B.t(lx*0.55, 2.6, lz*0.55); B.rx(lz*0.09); B.rz(-lx*0.09);
+    B.box(0.13, 5.4, 0.13, PAL.pole, 0); B.pop();
+  }
+  B.boxAt(0, 5.3, 0, 1.1, 0.12, 1.1, PAL.pole, 0);
+  B.push(); B.t(0, 5.75, 0);
+  B.push(); B.rx(0); B.boxAt(-0.4, 0, 0, 0.9, 0.10, 0.10, PAL.steel, 0); B.pop();
+  B.push(); B.t(0.35, 0, 0);
+  const spin = t*2.2;
+  for(let k=0;k<8;k++){
+    B.push(); B.rx(spin + k*TAU/8); B.boxAt(0, 0.62, 0, 0.045, 1.05, 0.20, PAL.steel, 0.06); B.pop();
+  }
+  B.push(); B.rx(spin); B.cyl(0.09,0.09,0.2,6,PAL.frameBlk,0,3); B.pop();
+  B.pop();
+  B.boxAt(-0.95, 0.05, 0, 0.55, 0.42, 0.045, PAL.rust, 0);   // tail vane
+  B.pop();
+  B.pop();
+}
+
+function buildTumbleweed(B, tw){
+  B.push(); B.t(tw.x, tw.y, tw.z); B.rx(tw.roll); B.ry(tw.roll*0.6);
+  for(let k=0;k<6;k++){
+    B.push(); B.ry(k*1.05); B.rx(k*0.7); B.box(0.72, 0.05, 0.05, PAL.tumble, 0); B.box(0.05, 0.6, 0.05, PAL.tumble, 0); B.pop();
+  }
+  B.pop();
+}
+
+function buildVulture(B, v, t){
+  B.push(); B.t(v.x, v.y, v.z); B.ry(v.heading); B.rz(v.bank);
+  B.box(0.55, 0.11, 0.13, C('#241f1c'), 0);
+  B.boxAt(0.30, 0.04, 0, 0.14, 0.08, 0.08, C('#33201a'), 0);
+  const flap = Math.sin(t*1.6 + v.seed)*0.14;
+  for(const sd of [-1,1]){
+    B.push(); B.t(0, 0.03, sd*0.08); B.rx(sd*(0.30+flap));
+    B.boxAt(0, 0.01, sd*0.42, 0.30, 0.025, 0.85, C('#241f1c'), 0);
+    B.pop();
+  }
+  B.pop();
+}
+"use strict";
+/* ================= particles ================= */
+const PMAX = 1600;
+const PT = {
+  n:0,
+  x:new Float32Array(PMAX), y:new Float32Array(PMAX), z:new Float32Array(PMAX),
+  vx:new Float32Array(PMAX), vy:new Float32Array(PMAX), vz:new Float32Array(PMAX),
+  s0:new Float32Array(PMAX), s1:new Float32Array(PMAX),
+  r:new Float32Array(PMAX), g:new Float32Array(PMAX), b:new Float32Array(PMAX),
+  a:new Float32Array(PMAX), life:new Float32Array(PMAX), age:new Float32Array(PMAX),
+  grav:new Float32Array(PMAX),
+  quads:new Float32Array(PMAX*6*PSTRIDE)
+};
+function spawnP(x,y,z, vx,vy,vz, life, s0,s1, col, a, grav){
+  if(PT.n >= PMAX) return;
+  const i = PT.n++;
+  PT.x[i]=x; PT.y[i]=y; PT.z[i]=z; PT.vx[i]=vx; PT.vy[i]=vy; PT.vz[i]=vz;
+  PT.life[i]=life; PT.age[i]=0; PT.s0[i]=s0; PT.s1[i]=s1;
+  PT.r[i]=col[0]; PT.g[i]=col[1]; PT.b[i]=col[2]; PT.a[i]=a; PT.grav[i]=grav||0;
+}
+function updateP(dt){
+  for(let i=0;i<PT.n;i++){
+    PT.age[i] += dt;
+    if(PT.age[i] >= PT.life[i]){
+      const l = --PT.n;
+      for(const k of ['x','y','z','vx','vy','vz','s0','s1','r','g','b','a','life','age','grav']) PT[k][i] = PT[k][l];
+      i--; continue;
+    }
+    PT.vy[i] += PT.grav[i]*dt;
+    PT.x[i] += PT.vx[i]*dt; PT.y[i] += PT.vy[i]*dt; PT.z[i] += PT.vz[i]*dt;
+  }
+}
+function fillPQuads(){
+  const q = PT.quads; let o = 0;
+  const CORN = [[-1,-1],[1,-1],[1,1],[-1,-1],[1,1],[-1,1]];
+  for(let i=0;i<PT.n;i++){
+    const u = PT.age[i]/PT.life[i];
+    const size = lerp(PT.s0[i], PT.s1[i], u);
+    const al = PT.a[i] * Math.min(1, u*7+0.1) * Math.pow(1-u, 1.15);
+    for(let c=0;c<6;c++){
+      q[o]=PT.x[i]; q[o+1]=PT.y[i]; q[o+2]=PT.z[i];
+      q[o+3]=CORN[c][0]; q[o+4]=CORN[c][1];
+      q[o+5]=PT.r[i]; q[o+6]=PT.g[i]; q[o+7]=PT.b[i]; q[o+8]=al;
+      q[o+9]=size;
+      o += PSTRIDE;
+    }
+  }
+  return PT.n*6;
+}
+const DUST_C  = [0.88, 0.70, 0.50];
+const SMOKE_C = [0.37, 0.36, 0.38];
+const STEAM_C = [0.95, 0.92, 0.88];
+const MFX_C   = [0.85, 0.82, 0.78];
+
+/* ================= world state ================= */
+const HEIST = 32;
+let simT = 0, dist = 0, paused = false;
+const rrng = mulberry(42);
+
+function mkRider(coat, shirt, pants, hat, band, gun){
+  return {col:{coat, shirt, pants, skin:PAL.skin, hat, bandana:band, boot:C('#2a2018')}, gun};
+}
+const HORSES = [
+  {name:'A', slotX:40.8, slotZ:2.35, coat:HORSE_COATS[0], blazeOn:true,  blanket:PAL.blanket1, seed:1.7,
+   rider:mkRider(PAL.duster1, PAL.red,   C('#3e3a35'), PAL.hatBlk, PAL.red,  'rev'),  fires:[], leader:true},
+  {name:'B', slotX:31.6, slotZ:4.35, coat:HORSE_COATS[1], blazeOn:false, blanket:PAL.blanket2, seed:4.1,
+   rider:mkRider(PAL.duster2, C('#8a7358'), PAL.denim, PAL.hatBrn, PAL.red,  'rifle'), fires:[6.8,7.4,14.2,20.5,25.4,25.9]},
+  {name:'C', slotX:25.0, slotZ:6.25, coat:HORSE_COATS[2], blazeOn:true,  blanket:PAL.blanket1, seed:7.9,
+   rider:mkRider(PAL.duster3, PAL.denimD, C('#4a4038'), PAL.hatTan, PAL.blue, 'rev'),  fires:[5.2,8.7,16.4,22.9,26.1]},
+  {name:'D', slotX:48.7, slotZ:-3.35, coat:HORSE_COATS[3], blazeOn:false, blanket:PAL.blanket2, seed:11.3,
+   rider:mkRider(PAL.duster2, PAL.red,   PAL.denimD, PAL.hatBlk, PAL.red,  'rev'),  fires:[], leaper:true},
+  {name:'E', slotX:19.4, slotZ:-5.85, coat:HORSE_COATS[4], blazeOn:false, blanket:PAL.blanket1, seed:15.2,
+   rider:mkRider(PAL.duster4, C('#7a6a52'), PAL.denim, PAL.hatBrn, PAL.blue, 'rev'),  fires:[9.1,18.3,27.6]}
+];
+for(const H of HORSES){
+  H.x = H.slotX; H.z = H.slotZ; H.stride = H.seed*0.37 % 1; H.yaw = 0;
+  H.gunRaise = 0; H.recoil = 0; H.flash = 0; H.justFired = false;
+  H.mounted = true; H.stand = 0; H.signal = false; H.legFrac = [0,0,0,0];
+}
+const GUARDS = [
+  {x:EXPRESS_DOOR_X-0.5, y:2.27, z:0.95, yaw:-Math.PI/2, fires:[7.9,12.1,17.2,23.6,28.3], flash:0, justFired:false},
+  {x:6.7, y:4.96, z:0.35, yaw:-0.35, fires:[11.3,21.8], flash:0, justFired:false}   // caboose roof, beside the cupola
+];
+const RUNNER = {x:39, runPhase:0, yaw:0, mode:'run', col:mkRider(PAL.duster4, C('#6e5a40'), C('#3e3a35'), PAL.hatBrn, PAL.red).col};
+const LEAP = {phase:'riding', x:0, y:0, z:0, yaw:0, pitch:0, flash:0}; // the leaper's own body when off-horse
+const VULT = [
+  {c:[36,17,-6], r:9,  sp:0.15, a:0.5, seed:1, dir:1},
+  {c:[30,20, 5], r:12, sp:0.11, a:3.4, seed:5, dir:-1}
+];
+const TWEEDS = [];
+const WMILL = {sx:480, z:16, y:null};
+
+let whistleWant = false, chuffAcc = 0, clankAcc = 0;
+let camRight = [1,0,0], camUp = [0,1,0], camEye = [0,2,0];
+
+function wrapX(sx){
+  let c = sx - (dist % PERIOD);
+  c -= PERIOD * Math.floor(c/PERIOD + 0.5);
+  return c;
+}
+
+/* fire-control envelope: returns [raise, flash, recoil, fired] for a fire-time list */
+function gunEnv(fires, hT, prevHT){
+  let raise = 0, flash = 0, recoil = 0, fired = false;
+  for(const f of fires){
+    raise = Math.max(raise, sstep(f-0.85, f-0.25, hT) * (1 - sstep(f+1.1, f+1.8, hT)));
+    const d = hT - f;
+    if(d >= 0 && d < 0.09) flash = Math.max(flash, 1 - d/0.09);
+    if(d >= 0 && d < 0.3) recoil = Math.max(recoil, 1 - d/0.3);
+    if(prevHT < f && hT >= f) fired = true;
+  }
+  return [raise, flash, recoil, fired];
+}
+
+/* ================= per-frame simulation ================= */
+function updateWorld(dt){
+  const prevHT = simT % HEIST;
+  simT += dt; dist = simT * TRAIN_SPEED;
+  const hT = simT % HEIST;
+  const wrapped = hT < prevHT;
+
+  /* --- horses --- */
+  for(const H of HORSES){
+    let tx = H.slotX + 2.1*Math.sin(simT*0.31 + H.seed) + 1.0*Math.sin(simT*0.83 + H.seed*2.1);
+    let tz = H.slotZ + 0.45*Math.sin(simT*0.5 + H.seed*1.3);
+    let riderOn = true, stand = 0;
+
+    if(H.leaper){
+      if(hT < 6){ /* slot */ }
+      else if(hT < 9.2){ const u = sstep(6, 9.2, hT); tx = lerp(tx, 48.9, u); tz = lerp(tz, -2.35, u); }
+      else if(hT < 10.2){ tx = 48.9; tz = -2.35; stand = sstep(9.2, 10.0, hT); }
+      else { /* horse peels away, rider gone */
+        riderOn = false;
+        const u1 = sstep(10.2, 16, hT), u2 = sstep(25, 31.9, hT);
+        tx = 48.9 - 27*u1 + 26.5*u2;
+        tz = -2.35 - 6.3*u1 + 5.2*u2;
+        stand = 0;
+      }
+      H.mounted = riderOn;
+      H.stand = stand;
+    }
+    if(H.leader) H.signal = (hT > 23.5 && hT < 27.5);
+
+    const k = Math.min(1, dt*1.6);
+    const oldX = H.x, oldZ = H.z;
+    H.x += (tx - H.x)*k;
+    H.z += (tz - H.z)*k;
+    const vz = (H.z - oldZ)/Math.max(dt, 1e-4);
+    H.yaw = clamp(vz*0.05, -0.22, 0.22);
+    const speed = TRAIN_SPEED + (H.x - oldX)/Math.max(dt, 1e-4);
+    const pPrev = H.stride;
+    H.stride += dt * clamp(speed, 8, 17)/5.0;
+
+    /* hoof strikes → dust + sound */
+    const OFF = [0, 0.13, 0.48, 0.61];
+    for(let l=0;l<4;l++){
+      const a = (pPrev + OFF[l]) % 1, b2 = (H.stride + OFF[l]) % 1;
+      if(a < 0.31 && b2 >= 0.31){
+        const hx = H.x + (l>=2? 0.8 : -0.85), hz = H.z + (l%2? 0.18 : -0.18);
+        for(let d2=0; d2<2; d2++)
+          spawnP(hx, 0.1, hz, -2.5-rrng()*2, 0.8+rrng()*1.2, (rrng()-0.5)*2.2, 1.4+rrng()*0.6, 0.35, 1.9+rrng(), DUST_C, 0.33, -0.25);
+        SND.hoof(H);
+      }
+    }
+    /* rolling dust plume behind */
+    if(rrng() < dt*9) spawnP(H.x-1.1, 0.15, H.z+(rrng()-0.5)*0.6, -3-rrng()*3, 0.5+rrng(), (rrng()-0.5)*1.5, 1.8+rrng(), 0.6, 3.0, DUST_C, 0.22, -0.1);
+
+    /* gunfire */
+    if(!H.leaper && !H.leader){
+      const [raise, flash, recoil, fired] = gunEnv(H.fires, hT, prevHT);
+      H.gunRaise = raise; H.flash = flash; H.recoil = recoil;
+      if(fired) H.justFired = true;
+    }
+  }
+
+  /* --- the leap --- */
+  const D = HORSES[3];
+  if(hT < 10.2){ LEAP.phase = 'riding'; }
+  else if(hT < 11.1){
+    LEAP.phase = 'flight';
+    const u = (hT - 10.2)/0.9;
+    LEAP.x = lerp(48.9, 50.4, u);
+    LEAP.z = lerp(-2.35, -0.25, u);
+    LEAP.y = lerp(2.62, 4.42, u) + 3.4*u*(1-u);
+    LEAP.pitch = 0.55 + 0.5*u;
+    LEAP.yaw = 0.35;
+    if(prevHT < 10.2 && hT >= 10.2){ /* push-off dust from the saddle */
+      for(let i2=0;i2<5;i2++) spawnP(48.9, 2.2, -2.3, -3-rrng()*2, 0.6+rrng(), (rrng()-0.5)*2, 1.2, 0.3, 1.4, DUST_C, 0.3, -0.3);
+    }
+  }
+  else if(hT < 12.4){ LEAP.phase = 'land'; LEAP.x = 50.4; LEAP.z = -0.25; LEAP.y = 4.42; LEAP.pitch = 0; LEAP.yaw = 0;
+    if(prevHT < 11.1 && hT >= 11.1) SND.thud();
+  }
+  else if(hT < 15.5){ LEAP.phase = 'creep'; const u = sstep(12.4, 15.5, hT); LEAP.x = lerp(50.4, 51.7, u); LEAP.z = lerp(-0.25, 0, u); LEAP.y = 4.42; }
+  else { LEAP.phase = 'threat'; LEAP.x = 51.7; LEAP.z = 0; LEAP.y = 4.52;
+    LEAP.flash = 0; const d = hT - 15.9;
+    if(d >= 0 && d < 0.09) LEAP.flash = 1 - d/0.09;
+    if(prevHT < 15.9 && hT >= 15.9){ SND.shot([51.7, 5.6, 0]); spawnMuzzleSmoke([52.3, 5.8, 0]); }
+  }
+
+  /* --- roof runner --- */
+  const rx = 39.25 + 3.75*Math.sin(simT*0.35);
+  const rvx = 3.75*0.35*Math.cos(simT*0.35);
+  RUNNER.x = rx;
+  RUNNER.yaw = rvx >= 0 ? 0 : Math.PI;
+  RUNNER.mode = 'run';
+  RUNNER.runPhase += dt * (0.35 + Math.abs(rvx)*1.9);
+
+  /* --- guards --- */
+  for(const g of GUARDS){
+    const [raise, flash, recoil, fired] = gunEnv(g.fires, hT, prevHT);
+    g.flash = flash;
+    if(fired) g.justFired = true;
+  }
+
+  /* --- locomotive breath --- */
+  const chuffStep = Math.PI*0.72/2;   // 4 per wheel revolution
+  chuffAcc += dt*TRAIN_SPEED;
+  while(chuffAcc >= chuffStep){
+    chuffAcc -= chuffStep;
+    const sx = 61.6, sy = 5.2;
+    for(let i2=0;i2<3;i2++)
+      spawnP(sx+(rrng()-0.5)*0.3, sy, (rrng()-0.5)*0.3, -12.8-rrng()*1.6, 3.0+rrng()*1.3, (rrng()-0.5)*1.2,
+             2.6+rrng()*1.0, 0.85, 3.8+rrng()*1.2, SMOKE_C, 0.24, 0.55);
+    SND.chuff();
+  }
+  clankAcc += dt;
+  if(clankAcc > 0.82){ clankAcc = 0; SND.clank(); }
+
+  /* whistle: long blast early, two short mid-heist */
+  const w1 = hT > 1.5 && hT < 3.2, w2 = (hT > 20 && hT < 20.5) || (hT > 20.9 && hT < 21.6);
+  const want = w1 || w2;
+  if(want !== whistleWant){ whistleWant = want; SND.whistle(want); }
+  if(want && rrng() < dt*40) spawnP(58.15, 4.35, 0, -13+(rrng()-0.5), 2.6+rrng(), (rrng()-0.5)*0.8, 0.9, 0.25, 1.5, STEAM_C, 0.5, 0);
+
+  /* light wheel-kick dust along the consist */
+  if(rrng() < dt*22){
+    const wx2 = 2 + rrng()*62;
+    spawnP(wx2, 0.25, (rrng()<0.5?-1.15:1.15), -13-rrng()*2, 0.4+rrng()*0.8, (rrng()-0.5), 1.4+rrng(), 0.4, 2.2, DUST_C, 0.16, -0.1);
+  }
+
+  /* headlamp halo */
+  spawnP(62.75, 3.86, 0, -TRAIN_SPEED, 0, 0, 0.09, 0.75, 0.95, [1, 0.83, 0.55], 0.10, 0);
+
+  /* --- tumbleweeds --- */
+  if((prevHT < 7 && hT >= 7) || (prevHT < 23 && hT >= 23)){
+    TWEEDS.push({x:128+rrng()*30, z:27+rrng()*4, vz:-(7+rrng()*2), y:0.45, roll:0, age:0, bp:0});
+  }
+  for(let i2=TWEEDS.length-1; i2>=0; i2--){
+    const tw = TWEEDS[i2];
+    tw.age += dt;
+    tw.x += (-TRAIN_SPEED + 0.4)*dt;
+    tw.z += tw.vz*dt;
+    const bA = Math.abs(Math.sin(tw.age*4.2));
+    tw.y = 0.42 + 0.65*bA*Math.max(0.25, 1 - tw.age*0.04);
+    tw.roll += dt*Math.abs(tw.vz)/0.45;
+    const bp = Math.floor(tw.age*4.2/Math.PI);
+    if(bp !== tw.bp){ tw.bp = bp; spawnP(tw.x, 0.12, tw.z, -1, 0.4, tw.vz*0.3, 0.8, 0.25, 1.0, DUST_C, 0.25, -0.2); }
+    if(tw.z < -45 || tw.x < -60) TWEEDS.splice(i2,1);
+  }
+
+  /* --- vultures --- */
+  for(const v of VULT){
+    v.a += dt*v.sp*v.dir;
+    v.x = v.c[0] + v.r*Math.cos(v.a);
+    v.y = v.c[1] + 1.5*Math.sin(v.a*2 + v.seed);
+    v.z = v.c[2] + v.r*Math.sin(v.a);
+    v.heading = -v.a - v.dir*Math.PI/2;
+    v.bank = v.dir*0.28;
+  }
+
+  updateP(dt);
+}
+
+function spawnMuzzleSmoke(m){
+  for(let i=0;i<4;i++)
+    spawnP(m[0], m[1], m[2], -12.5+(rrng()-0.5)*1.5, 0.7+rrng()*0.8, (rrng()-0.5)*1.5, 0.9+rrng()*0.4, 0.14, 1.1, MFX_C, 0.4, 0.3);
+}
+
+/* ================= per-frame build ================= */
+const DYN = new MeshBuilder(90000);
+const SB = new ShadowBuilder(4000);
+
+function buildFrame(t){
+  DYN.reset(); SB.reset();
+
+  const fireFlicker = 0.55 + 0.30*Math.abs(Math.sin(t*9.1) * Math.sin(t*13.7));
+  buildTrain(DYN, t, dist, fireFlicker);
+
+  /* horses + riders */
+  for(const H of HORSES){
+    const hadRider = H.mounted !== false;
+    const out = buildHorse(DYN, {
+      x:H.x, z:H.z, yaw:H.yaw, stride:H.stride, coat:H.coat, blazeOn:H.blazeOn, blanket:H.blanket,
+      rider: hadRider ? H.rider : null,
+      stand:H.stand||0, gunRaise:H.gunRaise, recoil:H.recoil, flash:H.flash, signal:H.signal
+    }, t);
+    if(H.justFired){
+      H.justFired = false;
+      if(out.muzzle){ SND.shot(out.muzzle); spawnMuzzleSmoke(out.muzzle); }
+    }
+    castShadow(SB, H.x, 0.02, H.z, 1.3, 0.6, 1.5, 0.30);
+  }
+
+  /* train shadow */
+  for(const [kind, x0, L] of CONSIST){
+    SB.blob(x0+L/2, 0.05, -1.4, L/2+0.7, 2.5, 0, 0.30);
+    SB.blob(x0+L/2+0.6, 0.05, -3.6, L/2+0.4, 1.7, 0, 0.13);
+  }
+
+  /* the leaper off-horse */
+  if(LEAP.phase !== 'riding'){
+    const mode = LEAP.phase==='flight' ? 'tuck' : LEAP.phase==='land' ? 'crouch' : LEAP.phase==='creep' ? 'crouch' : 'threat';
+    buildFreeBandit(DYN, {
+      x:LEAP.x, y:LEAP.y, z:LEAP.z, yaw:LEAP.yaw, pitch:LEAP.pitch,
+      mode, col:HORSES[3].rider.col, gun: (mode==='threat'||mode==='crouch') ? 'rev' : null,
+      flash:LEAP.flash, flap:0.7
+    });
+    if(LEAP.phase !== 'flight') SB.blob(LEAP.x, TENDER_TOP_Y+0.34, LEAP.z, 0.55, 0.45, 0, 0.25);
+  }
+
+  /* roof runner */
+  buildFreeBandit(DYN, {
+    x:RUNNER.x, y:EXPRESS_ROOF_Y + 0.70, z:0, yaw:RUNNER.yaw, pitch:0,
+    mode:RUNNER.mode, runPhase:RUNNER.runPhase, col:RUNNER.col, gun:null, flap:0.8
+  });
+  SB.blob(RUNNER.x, EXPRESS_ROOF_Y+0.03, 0, 0.55, 0.42, 0, 0.25);
+
+  /* guards */
+  for(const g of GUARDS){
+    const out = buildGuard(DYN, g, t);
+    if(g.justFired){
+      g.justFired = false;
+      if(out.muzzle){ SND.shot(out.muzzle); spawnMuzzleSmoke(out.muzzle); }
+    }
+  }
+
+  /* windmill (scenery-fixed but animated) */
+  if(WMILL.y === null) WMILL.y = terrH(WMILL.sx, WMILL.z);
+  const wx = wrapX(WMILL.sx);
+  if(Math.abs(wx) < 240){
+    buildWindmill(DYN, wx, WMILL.y, WMILL.z, t);
+    castShadow(SB, wx, WMILL.y, WMILL.z, 1.2, 1.2, 6, 0.3);
+  }
+
+  /* tumbleweeds + vultures */
+  for(const tw of TWEEDS){
+    buildTumbleweed(DYN, tw);
+    SB.blob(tw.x, 0.04, tw.z, 0.5, 0.4, 0, 0.2*clamp(1-tw.y*0.5,0.2,1));
+  }
+  for(const v of VULT) buildVulture(DYN, v, t);
+
+  /* static scenery shadows (wrapped) */
+  for(const s of SHADOW_STATIC){
+    const sx = wrapX(s.x);
+    if(Math.abs(sx) < 200) castShadow(SB, sx, terrH(s.x, s.z)+0.06, s.z, s.rx, s.rz, s.h, s.a);
+  }
+}
+
+/* ================= camera ================= */
+const CAM = {auto:true, yaw:2.7, pitch:0.22, dist:26, tgt:[38.5, 2.8, 0], fov:52};
+function wob(t, s){ return Math.sin(t*1.1+s)*0.5 + Math.sin(t*2.3+s*2.1)*0.32 + Math.sin(t*4.7+s*3.2)*0.18; }
+
+const SHOTS = [
+  /* 0 — locomotive hero */
+  (tl)=>({eye:[77.5-0.55*tl, 2.7, 8.0-0.22*tl], look:[60, 2.9, -0.6], fov:48}),
+  /* 1 — low tracking beside the riders */
+  (tl)=>({eye:[46.5-0.85*tl, 1.35, 11.0], look:[34, 2.0, -0.8], fov:55}),
+  /* 2 — over C's shoulder toward the express car */
+  (tl)=>{ const h = HORSES[2]; return {eye:[h.x-4.6, 3.0, h.z+1.5], look:[h.x+10, 2.4, h.z-6.0], fov:58}; },
+  /* 3 — crane, the whole raid */
+  (tl)=>({eye:[57-1.3*tl, 14.5-0.4*tl, 26-0.7*tl], look:[36, 2.4, 0], fov:50}),
+  /* 4 — down the roofline with the runner */
+  (tl)=>({eye:[RUNNER.x-6.5, 6.1, 2.7], look:[RUNNER.x+5.5, 4.5, -0.4], fov:55}),
+  /* 5 — track-level, train bearing down */
+  (tl)=>({eye:[24.5, 0.95, 2.55], look:[41, 2.4, 0.4], fov:62})
+];
+const SHOT_ORDER = [0, 1, 4, 3, 5, 2];
+function leapShot(){
+  const p = LEAP.phase==='riding' ? {x:HORSES[3].x, y:2.4, z:HORSES[3].z} : LEAP;
+  return {eye:[p.x+8.2, 3.4, p.z-6.8], look:[p.x, p.y+0.3, p.z], fov:48};
+}
+function cameraNow(t){
+  let spec;
+  if(CAM.auto){
+    const hT = simT % HEIST;
+    if(LOCK_SHOT !== null){
+      spec = LOCK_SHOT === 'leap' ? leapShot() : SHOTS[clamp(parseInt(LOCK_SHOT,10)||0, 0, SHOTS.length-1)]((simT%8));
+    }else if(hT > 9.3 && hT < 13.6 && HORSES[3]){
+      spec = leapShot();
+    }else{
+      const slot = Math.floor(simT/8);
+      spec = SHOTS[SHOT_ORDER[slot % SHOT_ORDER.length]](simT - slot*8);
+    }
+    if(!REDUCED){
+      const w = 0.055;
+      spec.eye = [spec.eye[0]+wob(t,1)*w, spec.eye[1]+wob(t,7)*w*0.7, spec.eye[2]+wob(t,13)*w];
+      spec.look = [spec.look[0]+wob(t,3)*w*0.5, spec.look[1]+wob(t,9)*w*0.4, spec.look[2]+wob(t,17)*w*0.5];
+    }
+  }else{
+    const cp = Math.cos(CAM.pitch);
+    spec = {
+      eye:[CAM.tgt[0]+CAM.dist*cp*Math.cos(CAM.yaw), CAM.tgt[1]+CAM.dist*Math.sin(CAM.pitch), CAM.tgt[2]+CAM.dist*cp*Math.sin(CAM.yaw)],
+      look:CAM.tgt.slice(), fov:CAM.fov
+    };
+  }
+  if(spec.eye[1] < 0.5) spec.eye[1] = 0.5;
+  return spec;
+}
+
+/* ================= input ================= */
+(function(){
+  const el = canvas;
+  const pts = new Map();
+  let lastPinch = 0;
+  el.addEventListener('pointerdown', e=>{
+    el.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, [e.clientX, e.clientY]);
+    el.classList.add('dragging');
+  });
+  el.addEventListener('pointermove', e=>{
+    if(!pts.has(e.pointerId)) return;
+    const [px, py] = pts.get(e.pointerId);
+    const dx = e.clientX-px, dy = e.clientY-py;
+    pts.set(e.pointerId, [e.clientX, e.clientY]);
+    if(pts.size === 1){
+      if(CAM.auto){ CAM.auto = false; syncCamButtons(); }
+      CAM.yaw += dx*0.0042;
+      CAM.pitch = clamp(CAM.pitch + dy*0.0032, 0.03, 1.25);
+    }else if(pts.size === 2){
+      const arr = [...pts.values()];
+      const d = Math.hypot(arr[0][0]-arr[1][0], arr[0][1]-arr[1][1]);
+      if(lastPinch > 0) CAM.dist = clamp(CAM.dist * lastPinch/d, 7, 90);
+      lastPinch = d;
+    }
+  });
+  const up = e=>{ pts.delete(e.pointerId); lastPinch = 0; el.classList.remove('dragging'); };
+  el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
+  el.addEventListener('wheel', e=>{
+    e.preventDefault();
+    if(CAM.auto){ CAM.auto = false; syncCamButtons(); }
+    CAM.dist = clamp(CAM.dist*Math.exp(e.deltaY*0.0011), 7, 90);
+  }, {passive:false});
+  window.addEventListener('keydown', e=>{
+    if(e.code === 'Space'){ e.preventDefault(); paused = !paused; }
+    if(e.key === 'c' || e.key === 'C'){ CAM.auto = !CAM.auto; syncCamButtons(); }
+  });
+})();
+
+/* ================= audio ================= */
+const SND = {
+  ctx:null, on:false, master:null, noiseBuf:null, echoIn:null, panOK:false, whistleNodes:null,
+  ensure(){
+    if(this.ctx) return true;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return false;
+    const ctx = this.ctx = new AC();
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -16; comp.knee.value = 12; comp.ratio.value = 7;
+    this.master = ctx.createGain(); this.master.gain.value = 0;
+    this.master.connect(comp); comp.connect(ctx.destination);
+    const len = ctx.sampleRate*2, buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for(let i=0;i<len;i++) d[i] = Math.random()*2-1;
+    this.noiseBuf = buf;
+    this.panOK = !!ctx.createStereoPanner;
+    /* canyon slap-back for gunshots */
+    const dl = ctx.createDelay(1.0); dl.delayTime.value = 0.31;
+    const fb = ctx.createGain(); fb.gain.value = 0.32;
+    const wet = ctx.createGain(); wet.gain.value = 0.35;
+    dl.connect(fb); fb.connect(dl); dl.connect(wet); wet.connect(this.master);
+    this.echoIn = dl;
+    /* beds: rolling rumble + desert wind */
+    this.bed(90, 240, 0.16, 0.5);
+    this.bed(500, 1400, 0.045, 0.17);
+    return true;
+  },
+  bed(f0, f1, g, lfoHz){
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource(); src.buffer = this.noiseBuf; src.loop = true;
+    const bp = ctx.createBiquadFilter(); bp.type='bandpass';
+    bp.frequency.value = (f0+f1)/2; bp.Q.value = 0.35;
+    const gn = ctx.createGain(); gn.gain.value = g;
+    const lfo = ctx.createOscillator(); lfo.frequency.value = lfoHz;
+    const lg = ctx.createGain(); lg.gain.value = g*0.45;
+    lfo.connect(lg); lg.connect(gn.gain);
+    src.connect(bp); bp.connect(gn); gn.connect(this.master);
+    src.start(); lfo.start();
+  },
+  pan(node, world){
+    if(!this.panOK){ node.connect(this.master); return node; }
+    const p = this.ctx.createStereoPanner();
+    const dir = v3norm(v3sub(world, camEye));
+    p.pan.value = clamp(v3dot(dir, camRight), -0.85, 0.85);
+    node.connect(p); p.connect(this.master);
+    return p;
+  },
+  burst(opts){
+    if(!this.on) return;
+    const ctx = this.ctx, t0 = ctx.currentTime;
+    const src = ctx.createBufferSource(); src.buffer = this.noiseBuf;
+    src.playbackRate.value = opts.rate || 1;
+    const f = ctx.createBiquadFilter(); f.type = opts.type||'bandpass';
+    f.frequency.value = opts.freq; f.Q.value = opts.Q||0.8;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(opts.gain, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0+opts.dur);
+    src.connect(f); f.connect(g);
+    const tail = opts.world ? this.pan(g, opts.world) : (g.connect(this.master), g);
+    if(opts.echo){ const e = ctx.createGain(); e.gain.value = opts.echo; g.connect(e); e.connect(this.echoIn); }
+    src.start(t0, Math.random()*1.5, opts.dur+0.05);
+    void tail;
+  },
+  shot(world){
+    if(!this.on) return;
+    const d = v3len(v3sub(world, camEye));
+    const att = clamp(26/(10+d), 0.12, 1);
+    this.burst({freq:2100, Q:0.6, dur:0.05, gain:0.6*att, world, echo:0.5});
+    this.burst({freq:400, Q:0.5, dur:0.17, gain:0.55*att, world, echo:0.35, type:'lowpass'});
+    const ctx = this.ctx, t0 = ctx.currentTime;
+    const o = ctx.createOscillator(); o.type='sine';
+    o.frequency.setValueAtTime(140, t0); o.frequency.exponentialRampToValueAtTime(46, t0+0.12);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.5*att, t0); g.gain.exponentialRampToValueAtTime(0.001, t0+0.14);
+    o.connect(g); g.connect(this.master);
+    o.start(t0); o.stop(t0+0.16);
+  },
+  chuff(){
+    if(!this.on) return;
+    this.burst({freq:210+Math.random()*50, Q:0.9, dur:0.10, gain:0.13});
+  },
+  clank(){
+    if(!this.on) return;
+    this.burst({freq:1250, Q:7, dur:0.055, gain:0.045});
+    this.burst({freq:820, Q:6, dur:0.075, gain:0.04});
+  },
+  hoof(H){
+    if(!this.on) return;
+    const d = v3len(v3sub([H.x, 0.5, H.z], camEye));
+    if(d > 26) return;
+    this.burst({freq:230+Math.random()*60, Q:0.8, dur:0.05, gain:0.10*clamp(16/(6+d),0.2,1), type:'lowpass'});
+  },
+  thud(){
+    if(!this.on) return;
+    this.burst({freq:160, Q:0.6, dur:0.12, gain:0.3, type:'lowpass'});
+  },
+  whistle(onNow){
+    if(!this.ctx || !this.on){ this.whistleNodes = null; return; }
+    const ctx = this.ctx, t0 = ctx.currentTime;
+    if(onNow){
+      const gn = ctx.createGain(); gn.gain.setValueAtTime(0.0001, t0);
+      gn.gain.exponentialRampToValueAtTime(0.13, t0+0.09);
+      const lp = ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value = 2600;
+      gn.connect(lp); lp.connect(this.master);
+      const e = ctx.createGain(); e.gain.value = 0.25; lp.connect(e); e.connect(this.echoIn);
+      const vib = ctx.createOscillator(); vib.frequency.value = 5.4;
+      const vg = ctx.createGain(); vg.gain.value = 4.5; vib.connect(vg); vib.start();
+      const oscs = [];
+      for(const f of [415, 494, 622]){
+        const o = ctx.createOscillator(); o.type='triangle'; o.frequency.value = f;
+        vg.connect(o.frequency);
+        o.connect(gn); o.start(); oscs.push(o);
+      }
+      oscs.push(vib);
+      this.whistleNodes = {gn, oscs};
+    }else if(this.whistleNodes){
+      const w = this.whistleNodes; this.whistleNodes = null;
+      w.gn.gain.setTargetAtTime(0.0001, t0, 0.12);
+      for(const o of w.oscs) o.stop(t0+0.7);
+    }
+  },
+  setOn(b){
+    if(b && !this.ensure()) return;
+    this.on = b;
+    if(this.ctx){
+      if(b) this.ctx.resume();
+      this.master.gain.setTargetAtTime(b ? 0.9 : 0.0, this.ctx.currentTime, 0.15);
+    }
+  }
+};
+
+/* ================= HUD ================= */
+const btnSound = document.getElementById('btnSound');
+const btnCam = document.getElementById('btnCam');
+const hintEl = document.getElementById('hint');
+function syncCamButtons(){
+  btnCam.innerHTML = CAM.auto ? '&#127916; cinematic' : '&#128441; free cam &mdash; click for cinematic';
+}
+btnSound.addEventListener('click', ()=>{
+  SND.setOn(!SND.on);
+  btnSound.innerHTML = SND.on ? '&#9835; sound on' : '&#9834; sound off';
+});
+btnCam.addEventListener('click', ()=>{ CAM.auto = !CAM.auto; syncCamButtons(); });
+syncCamButtons();
+setTimeout(()=> hintEl.classList.add('gone'), 11000);
+
+const titleEl = document.getElementById('title');
+if(!PARAMS.has('noui')){
+  setTimeout(()=> titleEl.classList.add('show'), 500);
+  setTimeout(()=> titleEl.classList.remove('show'), 7200);
+}
+
+/* ================= main loop ================= */
+const STATIC_MESH = buildStatic();
+gl.bindBuffer(gl.ARRAY_BUFFER, bufStatic);
+gl.bufferData(gl.ARRAY_BUFFER, STATIC_MESH.data, gl.STATIC_DRAW);
+
+gl.enable(gl.DEPTH_TEST);
+gl.depthFunc(gl.LEQUAL);
+gl.disable(gl.CULL_FACE);
+gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+gl.clearColor(FOG_COL[0], FOG_COL[1], FOG_COL[2], 1);
+
+/* fast-forward for deterministic screenshots */
+if(START_T > 0){
+  const steps = Math.min(Math.floor(START_T*30), 30*240);
+  for(let i=0;i<steps;i++) updateWorld(1/30);
+}
+
+let lastNow = performance.now();
+let slowFrames = 0;
+
+function frame(now){
+  requestAnimationFrame(frame);
+  const dt = clamp((now - lastNow)/1000, 0.0005, 0.05);
+  lastNow = now;
+
+  if(!paused) updateWorld(dt);
+  resize();
+
+  const spec = cameraNow(simT);
+  const eye = spec.eye, look = spec.look;
+  camEye = eye;
+  const aspect = canvas.width/Math.max(1, canvas.height);
+  const proj = m4persp(spec.fov*Math.PI/180, aspect, 0.1, 900);
+  const view = m4lookAt(eye, look, [0,1,0]);
+  const vp = m4mul(proj, view);
+  const fwd = v3norm(v3sub(look, eye));
+  camRight = v3norm(v3cross(fwd, [0,1,0]));
+  camUp = v3cross(camRight, fwd);
+
+  if(!paused) buildFrame(simT);
+
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  /* ---- lit geometry ---- */
+  gl.useProgram(GEO.p);
+  gl.uniformMatrix4fv(GEO.u.uVP, false, vp);
+  gl.uniform3fv(GEO.u.uEye, eye);
+  gl.uniform1f(GEO.u.uFogDen, FOG_DEN);
+  gl.uniform3fv(GEO.u.uSunDir, SUN_DIR);
+  gl.uniform3fv(GEO.u.uSunCol, SUN_COL);
+  gl.uniform3fv(GEO.u.uAmbSky, AMB_SKY);
+  gl.uniform3fv(GEO.u.uAmbGnd, AMB_GND);
+  gl.uniform3fv(GEO.u.uFogCol, FOG_COL);
+  gl.uniform1f(GEO.u.uPeriod, PERIOD);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufStatic);
+  bindGeoAttribs();
+  gl.uniform1f(GEO.u.uWrapOn, 1);
+  gl.uniform1f(GEO.u.uScroll, dist % PERIOD);
+  gl.drawArrays(gl.TRIANGLES, 0, STATIC_MESH.count);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufDynamic);
+  gl.bufferData(gl.ARRAY_BUFFER, DYN.f.subarray(0, DYN.n*VSTRIDE), gl.DYNAMIC_DRAW);
+  bindGeoAttribs();
+  gl.uniform1f(GEO.u.uWrapOn, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, DYN.n);
+
+  /* ---- sky ---- */
+  gl.useProgram(SKY.p);
+  gl.depthMask(false);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufSky);
+  gl.enableVertexAttribArray(SKY.a.aXY);
+  gl.vertexAttribPointer(SKY.a.aXY, 2, gl.FLOAT, false, 8, 0);
+  gl.uniform3fv(SKY.u.uRight, camRight);
+  gl.uniform3fv(SKY.u.uUp, camUp);
+  gl.uniform3fv(SKY.u.uFwd, fwd);
+  gl.uniform1f(SKY.u.uTan, Math.tan(spec.fov*Math.PI/360));
+  gl.uniform1f(SKY.u.uAspect, aspect);
+  gl.uniform3fv(SKY.u.uSunDir, SUN_DIR);
+  gl.uniform3fv(SKY.u.uMoonDir, MOON_DIR);
+  gl.uniform3fv(SKY.u.uZen, SKY_ZEN);
+  gl.uniform3fv(SKY.u.uHor, SKY_HOR);
+  gl.uniform3fv(SKY.u.uGlow, SKY_GLOW);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  /* ---- shadows ---- */
+  gl.enable(gl.BLEND);
+  gl.useProgram(SHD.p);
+  gl.uniformMatrix4fv(SHD.u.uVP, false, vp);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufShadow);
+  gl.bufferData(gl.ARRAY_BUFFER, SB.f.subarray(0, SB.n*6), gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(SHD.a.aP);  gl.vertexAttribPointer(SHD.a.aP, 3, gl.FLOAT, false, 24, 0);
+  gl.enableVertexAttribArray(SHD.a.aUV); gl.vertexAttribPointer(SHD.a.aUV, 2, gl.FLOAT, false, 24, 12);
+  gl.enableVertexAttribArray(SHD.a.aA);  gl.vertexAttribPointer(SHD.a.aA, 1, gl.FLOAT, false, 24, 20);
+  gl.drawArrays(gl.TRIANGLES, 0, SB.n);
+
+  /* ---- particles ---- */
+  const pv = fillPQuads();
+  if(pv > 0){
+    gl.useProgram(PRT.p);
+    gl.uniformMatrix4fv(PRT.u.uVP, false, vp);
+    gl.uniform3fv(PRT.u.uRight, camRight);
+    gl.uniform3fv(PRT.u.uUp, camUp);
+    gl.uniform3fv(PRT.u.uEye, eye);
+    gl.uniform1f(PRT.u.uFogDen, FOG_DEN);
+    gl.uniform3fv(PRT.u.uFogCol, FOG_COL);
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufPart);
+    gl.bufferData(gl.ARRAY_BUFFER, PT.quads.subarray(0, pv*PSTRIDE), gl.DYNAMIC_DRAW);
+    const S = PSTRIDE*4;
+    gl.enableVertexAttribArray(PRT.a.aP);   gl.vertexAttribPointer(PRT.a.aP, 3, gl.FLOAT, false, S, 0);
+    gl.enableVertexAttribArray(PRT.a.aC);   gl.vertexAttribPointer(PRT.a.aC, 2, gl.FLOAT, false, S, 12);
+    gl.enableVertexAttribArray(PRT.a.aCol); gl.vertexAttribPointer(PRT.a.aCol, 4, gl.FLOAT, false, S, 20);
+    gl.enableVertexAttribArray(PRT.a.aSz);  gl.vertexAttribPointer(PRT.a.aSz, 1, gl.FLOAT, false, S, 36);
+    gl.drawArrays(gl.TRIANGLES, 0, pv);
+  }
+  gl.disable(gl.BLEND);
+  gl.depthMask(true);
+
+  /* adaptive resolution */
+  if(dt > 0.030 && DPR > 1){ if(++slowFrames > 100){ DPR = 1; slowFrames = -1e9; } }
+}
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
